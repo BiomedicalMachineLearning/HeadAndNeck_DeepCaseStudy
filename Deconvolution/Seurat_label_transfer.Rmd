@@ -1,0 +1,127 @@
+---
+title: "Seurat_label_transfer"
+author: "Andrew Causer"
+date: "2023-04-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+#libraries required for importation
+library(Seurat) #‘4.0.3’
+library(ggplot2)
+library(dplyr)
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+if (!requireNamespace("scran", quietly = TRUE))
+  install.packages("scran")
+#library(scran)
+library(scater)
+#library(PCAtools)
+library(tibble)
+library(SingleCellExperiment)
+library(hdf5r) 
+library(patchwork)
+library(gtools)
+library(clustree)
+
+#BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+#BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+#BiocManager::install("ComplexHeatmap")
+library(ComplexHeatmap)
+library(stringr)
+library(magick)
+#library(SpatialExperiment)
+library(gridExtra)
+
+
+library(EnhancedVolcano)
+library(GOplot)
+library(tidyr)
+library(circlize)
+library(readr)
+
+```
+
+# Load data and Single cell reference dataset
+```{r load_data}
+
+#Visium data
+S01_old_norm <- readRDS("/Volumes/SPOPSCC-Q4358/Finalised_S01/S01_old_norm.RDS")
+S01_norm <- readRDS("/Volumes/SPOPSCC-Q4358/Finalised_S01/S01_norm.RDS")
+
+# scRNA-seq Reference data
+x<-read.table("/Users/andrewcauser/Downloads/GSE181919_Barcode_metadata.txt.gz")
+y <- read.table("/Users/andrewcauser/Downloads/GSE181919_UMI_counts.txt.gz")
+```
+
+
+# Pre-processing of Single Cell Dataset 
+```{r inport_dataset}
+
+colnames(y) <- gsub("\\.","-",colnames(y))
+x_y <- CreateSeuratObject(counts = y, meta.data = x)
+sort(table(x_y@meta.data$cell.type))
+barplot(sort(table(x_y@meta.data$cell.type)), las = 2)
+
+x_y[['Barcode']] <- rownames(x_y@meta.data)
+
+Idents(x_y) <- "cell.type"
+
+x_y_T <- SCTransform(x_y, assay = "RNA", verbose = FALSE)
+
+cell_markers_xy <- FindAllMarkers(x_y_T, assay = "SCT", slot = "data", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+```
+
+# Visium data preprocessing for deconvolution
+```{r visium_preprocess_decon}
+x_y_T <- FindVariableFeatures(x_y_T, selection.method = "vst", nfeatures = 2000,
+        verbose = FALSE, assay = "SCT")
+x_y_T <- RunPCA(x_y_T, npcs = 30, verbose = FALSE)
+x_y_T <- RunUMAP(x_y_T, reduction = "pca", dims = 1:30)
+
+
+visium_data <- RunPCA(S01_old_norm, npcs = 30, verbose = FALSE)
+visium_data <- RunUMAP(visium_data, reduction = "pca", dims = 1:30)
+DimPlot(x_y_T, reduction = "umap", group.by = "cell.type", label = TRUE) #+ NoLegend()
+
+Idents(visium_data) <- "cluster"
+```
+
+# Seurat label transfer deconvolution
+```{r Seurat_label_transfer}
+xy.anchors <- FindTransferAnchors(reference = x_y_T, 
+                                        query = visium_data,
+                                        
+                                        #query.assay = "Spatial",
+                                        #reference.assay = "RNA",
+                                        reference.reduction = "pca",
+                                        dims = 1:30)
+                                        #project.query = TRUE)
+predictions <- TransferData(anchorset = xy.anchors, 
+                            refdata = x_y_T$cell.type,
+                            dims = 1:30)
+xy.query <- AddMetaData(visium_data, metadata = predictions)
+
+table(xy.query@meta.data$predicted.id)
+Idents(xy.query) = 'predicted.id'
+SpatialDimPlot(xy.query, label = T, label.size = 3)
+seurat_LT <- xy.query[[c("prediction.score.T.cells",
+                         "prediction.score.Malignant.cells",
+                         "prediction.score.B_Plasma.cells",
+                         "prediction.score.Endothelial.cells",
+                         "prediction.score.Fibroblasts",
+                         "prediction.score.Macrophages",
+                         "prediction.score.Dendritic.cells",
+                         "prediction.score.Mast.cells",
+                         "prediction.score.Myocytes",
+                         "prediction.score.Epithelial.cells",
+                         "predicted.id"
+                         )]]
+write.csv(seurat_LT, file = "/Volumes/SPOPSCC-Q4358/Andrew_decon_folder/seurat_LT_results.csv")
+```

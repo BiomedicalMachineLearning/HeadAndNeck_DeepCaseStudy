@@ -1,0 +1,511 @@
+---
+title: "Extra_Patient_LR_analysis"
+author: "Andrew Causer"
+date: "2023-04-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r include=FALSE}
+#libraries required for importation
+library(Seurat) #‘4.0.3’
+library(ggplot2)
+library(dplyr)
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+if (!requireNamespace("scran", quietly = TRUE))
+  install.packages("scran")
+library(scater)
+library(tibble)
+library(SingleCellExperiment)
+library(hdf5r) 
+library(patchwork)
+library(gtools)
+library(clustree)
+
+```
+
+# Load additional patient data
+
+```{r load_data}
+# Set up working directories
+setwd("/Volumes/SPOPSCC-Q4358/Visium_FFPE_Jaz_2")
+wd <- c("/Volumes/SPOPSCC-Q4358/Visium_FFPE_Jaz_2/")
+outputdir <- c("/Volumes/SPOPSCC-Q4358/All_Samples_Visium_FFPE")
+datadir6 <- paste0(wd,"D2_PA20P38457_PA20P42157")
+
+# Load data
+seuratObjD2 <- Load10X_Spatial(datadir6, filename = "filtered_feature_bc_matrix.h5", assay = "Spatial", slice = "D2")
+
+```
+
+
+# Multiplexing Samples
+
+data has different samples on one slide. Data defining each section (constructed using 10x Louge software) is imported and added to the Visium data
+
+```{r multiplexing_samples, warning=FALSE, include=FALSE}
+#Using the manual selection in 10X genomics loupe browser can select each of the different tissue samples on the same slide
+
+#loads in coordinates of each sample
+loupe.wd <- paste0(wd,"Andrew_loupe/")
+
+
+##SLIDE D2##
+D2_457_1A <- read.delim(paste0(loupe.wd, "D2_457_edit.csv"), sep=",")
+D2_157 <- read.delim(paste0(loupe.wd, "D2_157.csv"), sep=",")
+
+# this function changes the name of a different tissue sample to Rep_...
+# (e.g. tissue 2 will now me titled as 'Rep_2')
+rename <- function(dat_csv, name){
+  non_na_index <- which((is.na(dat_csv[,2])) + 1 == 1 )
+  new_label <- dat_csv[,2] 
+  new_label[non_na_index] <- paste0(name,"_Rep_", new_label[non_na_index] )
+  dat_csv[,2] =  new_label
+  return(dat_csv)
+}
+
+D2_457_1A <- rename(D2_457_1A, name="D2_457_1A")
+D2_157 <- rename(D2_157, name="D2_157")
+
+```
+
+```{r adding_multiplexed_samples_to_seurat_object, warning = FALSE, include=FALSE} 
+
+#This function adds the annotations for each multiplexed sample describing each dissue peice
+add_species <- function(sr_ob, species_dat, slide_id){
+  #checks if there are more then 2 different types of tissue
+  if("tissue1" %in% colnames(sr_ob@meta.data)){
+    
+    print("too many layers of tissue labels, please check")
+    stop()
+  }
+  #makes tissue type 1
+  if("tissue" %in% colnames(sr_ob@meta.data)){
+    colnames(species_dat) <- c("Barcode", "tissue1")
+  } else {
+    colnames(species_dat) <- c("Barcode", "tissue") #makes tissue type 2
+  }
+  sr_ob@meta.data$Barcode = colnames(sr_ob) #creates new collumn to combine matching barcodes
+  t <- left_join(sr_ob@meta.data, species_dat, by="Barcode") 
+  #sr_ob@meta.data$orig.ident <- slide_id
+  if("tissue1" %in% colnames(t)){
+    na_index = which(is.na(t$tissue) + 1 ==2) #removes NA's and replaces with ""
+    t$tissue[na_index]  = ''
+    na_index_tissue1 = which(is.na(t$tissue1) + 1 ==2)
+    t$tissue1[na_index_tissue1]  = ''
+    t$tissue = paste0(t$tissue, t$tissue1) #makes into one combined collumn called tissue
+  }
+  sr_ob@meta.data$tissue <- t$tissue #updates the seurate object
+  return(sr_ob)
+}
+
+
+### Add back to seurat object
+#D2 is ok
+seuratObjD2 <-add_species(seuratObjD2,D2_457_1A, "D2_457_1A")
+seuratObjD2 <-add_species(seuratObjD2,D2_157, "D2_157")
+
+```
+
+# Plot seurat object
+```{r plot_extra_sample}
+SpatialDimPlot(seuratObjD2, group.by = "tissue")
+```
+
+
+
+```{r label_each_sample}
+# This function adds meta data infomation for each sample (across each array)
+# Include: tissue name, Tissue type, slide, patient number, HPV status, etc.
+grouping_samples <- function(sr_ob){
+  meta <- sr_ob[["tissue"]]
+  meta$tissue <- gsub("^$", "unassigned", meta$tissue)
+  meta$tissue <- gsub("Unassigned", "unassigned", meta$tissue)
+  meta$array <- meta$tissue
+  meta$array <- gsub("^D2.*", "D2", meta$array)
+  sr_ob <- AddMetaData(sr_ob, meta)
+
+  meta$Tissue_Sample <- meta$tissue
+  meta$Tissue_Sample <- gsub('Rep_1','',meta$Tissue_Sample)
+  meta$Tissue_Sample <- gsub('Rep_2','',meta$Tissue_Sample)
+  sr_ob <- AddMetaData(sr_ob, meta)
+  
+  meta$patient_number <- meta$Tissue_Sample
+  meta$patient_number <- gsub('^D2_457_.*','P6',meta$patient_number)
+  meta$patient_number <- gsub('^D2_157_.*','P6',meta$patient_number)
+
+  sr_ob <- AddMetaData(sr_ob, meta)
+}
+
+seuratObjD2<-grouping_samples(seuratObjD2)
+head(seuratObjD2)
+```  
+
+## Exploritory Data QC
+
+First we will look at the data to determine if there are any obvious errors/outlyers with it and preform some general data QC 
+
+"NOTE: There are no mitochondiral or ribosomal probes incldued in the dataset and thus no mito/ribo filtering will be preformed"
+
+# General data distribution of each stage on slide 1 and 2
+```{r analyse_data_distribution, echo=FALSE,warning=FALSE}
+outputdir.dataqc <- paste0(outputdir.samples,"/Data_QC/")
+dir.create(outputdir.dataqc)
+
+# constructs violin plot of the number/distribution of spots of each patient 
+# both features (genes) and counts (reads) are assessed
+
+prelim_data_visulisation <- function(sr_ob,dataoutput,slide_ID){
+  plot1 <- VlnPlot(sr_ob, features = "nCount_Spatial", pt.size = 0.1) + NoLegend()
+  plot2 <- SpatialFeaturePlot(sr_ob, features = "nCount_Spatial") + theme(legend.position = "right")
+  plot3 <- VlnPlot(sr_ob, features = "nFeature_Spatial", pt.size = 0.1) + NoLegend()
+  plot4 <- SpatialFeaturePlot(sr_ob, features = "nFeature_Spatial") + theme(legend.position = "right")
+  (plot1|plot2)/(plot3|plot4)
+  ggsave(paste0(dataoutput, "raw_data_distributions_seuratObj",slide_ID, ".pdf"), width = 3024, height = 1964,units = "px")
+ 
+}
+
+prelim_data_visulisation(seuratObjD2,outputdir.dataqc,"D2")
+
+```
+
+# Split Arrays into samples
+
+```{r split_arrays}
+
+split_array <- function(sr_ob) {
+  Idents(sr_ob) <- "Tissue_Sample"
+  x <- SplitObject(sr_ob, split.by = "ident")
+}
+
+seuratObjD2_split <- split_array(seuratObjD2)
+
+# Make new seurat object
+seuratObjD2_157 <- seuratObjD2_split$D2_157_
+#seuratObjD2_457 <- seuratObjD2_split$D2_457_1A_ #this data will not be included in the rest of the analysis
+
+```
+
+
+# Fix aspect ratio for each split image so it doesnt look stretched
+```{r aspect_ratio}
+
+generate_aspRatio <- function(sr_ob) {
+  coord <- GetTissueCoordinates(object = sr_ob)
+  # calculate the aspect ratio of rows to columns
+  myratio <- (max(coord$imagerow) - min(coord$imagerow)) / (max(coord$imagecol) -min(coord$imagecol))
+  myratio
+}
+
+my_aspRat <- generate_aspRatio(seuratObjD2_157)
+
+
+# Plot new image
+plot <- SpatialDimPlot(seuratObjD2_157, group.by = "tissue") + theme(legend.position = "right", aspect.ratio = my_aspRat)
+plot
+
+```
+
+# Removing outlying genes/spots
+
+
+```{r  QC_counts_vs_features, warning=FALSE}
+
+plot1 <- SpatialFeaturePlot(seuratObjD2_157, features = c("nCount_Spatial"), pt.size.factor = 2) + theme(aspect.ratio = my_aspRat)
+plot2 <- SpatialFeaturePlot(seuratObjD2_157, features = c("nFeature_Spatial"), pt.size.factor = 2) + theme(aspect.ratio = my_aspRat)
+plot3 <- FeatureScatter(seuratObjD2_157, feature1 = "nCount_Spatial", feature2 = "nFeature_Spatial", pt.size = 0.5)
+plot3/(plot1|plot2)
+
+```
+
+
+# Data QC -> filter dataset
+
+Red = lower threshold (-3*MAD)
+Blue = upper threshold ( +3*MAD)
+Green = generic threshold (200 reads/genes)
+```{r MAD_plots}
+
+#function generates distribution plots for each sample and dataset (features/counts) to observe which values/how many values are outlyers 
+#both Log and non-log approches are displayed
+filter_data_pots <- function(sr_ob, outdir, sampleID) {
+ 
+  log_low_ncount_threshold = median(log(sr_ob$nCount_Spatial)) - 3*mad(log(sr_ob$nCount_Spatial))
+  log_high_ncount_threshold = median(log(sr_ob$nCount_Spatial)) + 3*mad(log(sr_ob$nCount_Spatial))
+  log_low_nfeature_threshold = median(log(sr_ob$nFeature_Spatial)) - 3*mad(log(sr_ob$nFeature_Spatial))
+  log_high_nfeature_threshold = median(log(sr_ob$nFeature_Spatial)) + 3*mad(log(sr_ob$nFeature_Spatial))
+  
+  low_ncount_threshold = median(sr_ob$nCount_Spatial) - 3*mad(sr_ob$nCount_Spatial)
+  high_ncount_threshold = median(sr_ob$nCount_Spatial) + 3*mad(sr_ob$nCount_Spatial)
+  low_nfeature_threshold = median(sr_ob$nFeature_Spatial)- 3*mad(sr_ob$nFeature_Spatial)
+  high_nfeature_threshold = median(sr_ob$nFeature_Spatial) + 3*mad(sr_ob$nFeature_Spatial)
+  
+  
+  ncount_norm <- ggplot(sr_ob@meta.data, aes(x=nCount_Spatial))+geom_histogram(aes(y=..density..),bins=200,fill="grey")+geom_density() +geom_vline(aes(xintercept=low_ncount_threshold),color = "red") +geom_vline(aes(xintercept=high_ncount_threshold),color = "blue") + geom_vline(aes(xintercept=200), color = "green")
+  
+  ncount_log <- ggplot(sr_ob@meta.data, aes(x=log(nCount_Spatial)))+geom_histogram(aes(y=..density..),bins=200,fill="grey")+geom_density() +geom_vline(aes(xintercept=log_low_ncount_threshold),color = "red") +geom_vline(aes(xintercept=log_high_ncount_threshold),color = "blue") + geom_vline(aes(xintercept= log(200)), color = "green")
+  
+    nfeature_norm <- ggplot(sr_ob@meta.data, aes(x=nFeature_Spatial))+geom_histogram(aes(y=..density..),bins=200,fill="grey")+geom_density() +geom_vline(aes(xintercept=low_nfeature_threshold),color = "red") +geom_vline(aes(xintercept=high_nfeature_threshold),color = "blue")+ geom_vline(aes(xintercept=100), color = "green") 
+ 
+    nfeature_log <- ggplot(sr_ob@meta.data, aes(x=log(nFeature_Spatial)))+geom_histogram(aes(y=..density..),bins=200,fill="grey")+geom_density() +geom_vline(aes(xintercept=log_low_nfeature_threshold),color = "red") +geom_vline(aes(xintercept=log_high_nfeature_threshold),color = "blue") + geom_vline(aes(xintercept= log(200)), color = "green")
+  
+    ncount_norm+ncount_log+nfeature_norm+nfeature_log+labs(caption =  paste0("LRT: ",format(round(low_ncount_threshold,2),nsmall=2), ", HRT: ", format(round(high_ncount_threshold,2),nsmall=2), ", LFT: ",format(round(low_nfeature_threshold,2),nsmall=2), ", HFT: ", format(round(high_nfeature_threshold,2),nsmall=2), "  /   LOG -> ","LRT: ",format(round(log_low_ncount_threshold,2),nsmall=2), ", HRT: ", format(round(log_high_ncount_threshold,2),nsmall=2), ", LFT: ",format(round(log_low_nfeature_threshold,2),nsmall=2), ", HFT: ", format(round(log_high_nfeature_threshold,2),nsmall=2)))
+}
+
+
+filter_data_pots(seuratObjD2_157, outputdir, "seuratObjD2_157")
+```
+
+# Remove Outlyer spots
+
+spots with low read and gene counts were removed, also genes present in <3 spots were also removed
+```{r filter_poor_cells}
+filter_data <- function(sr_ob, outdir, sampleID) {
+
+  selected_f <-rownames(sr_ob)[Matrix::rowSums(sr_ob)>3] #filters genes which are expressed in atleast 3 cells
+  removed_f <-rownames(sr_ob)[Matrix::rowSums(sr_ob)<=3]
+  
+  write.table(removed_f, file = paste0(outdir, "/",sampleID, "_removed_genes.txt"), sep = "\t", quote = FALSE, col.names = NA)
+ 
+  data.filt <-subset(sr_ob, features = selected_f)
+  
+  #note: replace type with "both" -> DO I LOG TRANSFORM BEFORE FILTERING?
+  mad_reads.low <- isOutlier(data.filt$nCount_Spatial, nmads = 3, type = "lower")
+  mad_reads.high <- isOutlier(data.filt$nCount_Spatial, nmads = 3, type = "higher")
+  mad_gene.low <- isOutlier(data.filt$nFeature_Spatial, nmads = 3, type = "lower")
+  mad_gene.high <- isOutlier(data.filt$nFeature_Spatial, nmads = 3, type = "higher")
+  
+  
+  log_mad_reads.low <- isOutlier(data.filt$nCount_Spatial, nmads = 3, type = "lower", log = TRUE)
+  log_mad_reads.high <- isOutlier(data.filt$nCount_Spatial, nmads = 3, type = "higher", log = TRUE)
+  log_mad_gene.low <- isOutlier(data.filt$nFeature_Spatial, nmads = 3, type = "lower", log = TRUE)
+  log_mad_gene.high <- isOutlier(data.filt$nFeature_Spatial, nmads = 3, type = "higher", log = TRUE)
+  
+  
+  total.low <- mad_reads.low|mad_gene.low
+  total.high<-mad_reads.high|mad_gene.high
+  total.log.low <- log_mad_reads.low|log_mad_gene.low
+  total.log.high <-log_mad_reads.high|log_mad_gene.high
+
+  data.filt <- AddMetaData(data.filt, total.low, col.name = "low_outlyers")
+  data.filt <- AddMetaData(data.filt, total.high, col.name = "high_outlyers")
+  data.filt <- AddMetaData(data.filt, total.log.low, col.name = "LOG_low_outlyers")
+  data.filt <- AddMetaData(data.filt, total.log.high, col.name = "LOG_high_outlyers")
+ 
+
+
+  df <- data.frame(QCtype = c("RawTotalReads","RawTotalGenes","HighReadCounts","LowReadCounts","HighGene","LowGene","Gene_In_<3_Cells"), value= c(length(Cells(data.filt)),length(rownames(data.filt)),sum(mad_reads.high),sum(mad_reads.low),sum(mad_gene.high), sum(mad_gene.low), length(removed_f)))
+
+   plot1 <- ggplot(data=df, aes(x = QCtype, y = value)) + geom_bar(stat = "identity", fill = "steelblue") + geom_text(aes(label = value), vjust = -0.3, size = 3.5)
+   
+  
+  #discard <- mad_reads.low|mad_gene.low # just removed low reads and genes
+  #discard <- total.log.low
+
+  #Remove poor quality data
+  #filtered <- data.filt[,which(discard == "FALSE")]
+  filtered <- subset(data.filt, subset = nFeature_Spatial > 200) #filters cells which have more then 200 genes detected
+  plot2 <- SpatialDimPlot(filtered, group.by = "tissue")
+  plot3 <- SpatialDimPlot(data.filt,group.by = "tissue")
+  plot1|(plot2/plot3)
+  ggsave(paste0(outdir,"/",sampleID, "_QC_removed_values_nonlog.pdf" ))
+  #g1 = ggplot(as.data.frame())
+  
+  
+  return(filtered)
+}
+
+outputdir1 <- paste0(outputdir,"/Data_QC")
+dir.create(outputdir1)
+
+seuratObjD2_157 <-filter_data(seuratObjD2_157,outputdir1,"seuratObjD2_157")
+
+
+
+check_outlyers <- function(sr_ob) {
+  p1 <- SpatialDimPlot(sr_ob, group.by = "low_outlyers")
+  p2 <- SpatialDimPlot(sr_ob, group.by = "high_outlyers")
+  p3 <- SpatialDimPlot(sr_ob, group.by = "LOG_low_outlyers")
+  p4 <- SpatialDimPlot(sr_ob, group.by = "LOG_high_outlyers")
+  p1+p2+p3+p4
+}
+
+check_outlyers(seuratObjD2_157)
+
+```
+
+# Normalise data -> using SCTransform
+```{r normalise_data}
+D2_157_norm <- SCTransform(seuratObjD2_157, assay = "Spatial", verbose = FALSE, return.only.var.genes= TRUE)
+```
+
+
+# individual Clustering
+```{r clustering}
+
+#set number of pcas
+pcas <- 30
+
+sr_obj <- ScaleData(D2_157_norm, verbose = FALSE)
+sr_obj <- RunPCA(sr_obj, npcs = pcas, verbose = FALSE)
+sr_obj <- RunUMAP(sr_obj, reduction = "pca", dims = 1:pcas)
+sr_obj <- RunTSNE(sr_obj,reduction = "pca", dims = 1:pcas)
+sr_obj <- FindNeighbors(sr_obj, reduction = "pca", dims = 1:pcas)
+
+#clustering for sample D2_157_norm refered to as P5
+p5_clust <- FindClusters(sr_obj, resolution = 0.8)
+
+#plot clustering
+cr_cols <- c("#A6CEE3", "#1F78B4","#FB9A99", "#E31A1C", "#33A02C","#B2DF8A", "#FDBF6F", "#FF7F00", "#CAB2D6", "#6A3D9A", "#B15928", "maroon1","darkcyan","bisque2","coral4","goldenrod3","slateblue1")
+
+
+SpatialDimPlot(p5_clust, cols = col_pal,pt.size.factor = 1.3, label = TRUE) + theme(legend.position = "right", aspect.ratio = my_aspRat)
+DimPlot(p5_clust)
+
+```
+
+# add clusters back to raw seurat object
+```{r add_cluster_to_raw_obj_old}
+
+#loops through each value in original seruat object and adds cluster value to new column
+clusters_lables <- as.data.frame(p5_clust[[c("Barcode","sample", "seurat_clusters")]])
+
+i <- 1
+len <- dim(seuratObjD2_157[[]])[1]
+cluster_coords <- c()
+
+while (i <= len) {
+  spot <- seuratObjD2_157[[]][i,]
+  if (spot[4] %in% clusters_lables$Barcode) {
+    label <- clusters_lables[paste0(spot[4]),][2]
+  } else {
+    label <- "unassigned"
+  }
+  cluster_coords <- c(cluster_coords, paste0(label)) 
+  i <- i+1
+}
+
+cluster_coords_edit <- c()
+for (i in cluster_coords){
+  cluster_coords_edit <- c(cluster_coords_edit, (as.numeric(i)-1))
+}
+
+
+seuratObjD2_157 <- AddMetaData(seuratObjD2_157,cluster_coords_edit,col.name = "cluster")
+
+#Reorders the cluster levels to numeric order
+mylevels <- mixedsort(unique(seuratObjD2_157$cluster))
+seuratObjD2_157@meta.data$cluster <- factor(x = seuratObjD2_157@meta.data$cluster , levels = mylevels)
+
+SpatialDimPlot(seuratObjD2_157, group.by = 'cluster')
+```
+
+
+# DEG analysis of extra sample
+
+```{r case_report}
+outputdir.DE <- paste0(outputdir, "/DE_CR/")
+dir.create(outputdir.DE)
+
+filter_data_pots(seuratObjD2_157, outputdir.dataqc, "p5_post_clust")
+p5<-filter_data(seuratObjD2_157,outputdir.dataqc,"p5_post_clust")
+check_outlyers(seuratObjD2_157)
+
+#saveRDS(seuratObjS01_ss, file = paste0(outdir.DS, "seuratObjS01_ss.RDS"))
+
+#normalise data using 'LogNormalisation' -> SCTransform removes variance between genes which will effect DE analysis
+p5 <- SCTransform(p5, assay = "Spatial", verbose = FALSE)
+
+
+p5_markers <- FindAllMarkers(p5, assay = "SCT", only.pos = FALSE ,min.pct = 0.25,logfc.threshold = 0.25) %>% filter(p_val_adj <= 0.05)
+write.table(p5_markers, file = paste0(outputdir.DE,"tumour_difference_DE.txt"), sep = "\t", quote = FALSE, col.names = NA)
+
+```
+
+
+# Cell cycle analysis
+
+```{r cell_cycle}
+cell_cycle.outputdir <- paste0(outputdir, "/Cell_Cycle")
+dir.create(cell_cycle.outputdir)
+
+func_predictCellCycle <- function(seuratObj, myspecies="human", outdir,sampleID){
+  # USAGE: seuratObj <- func_predictCellCycle(seuratObj, "mouse")
+  # OUTPUT: a Seurat object with S/G2M-phase scores and cell stage (G1, S, G2M) calls
+
+  # specify the gene set used for Cell Cycle Scoring (human or mouse)
+  if (identical(myspecies, "mouse")) {
+    load("/Users/uqlgrice/Documents/IMB/Research/LabBooks/20200106_BuildPipe/data/mouse.cc.genes.Rdata")
+    geneset <- mouse.cc.genes
+  } else if (identical(myspecies, "human")) {
+    geneset <- cc.genes.updated.2019
+  } else {
+    stop("The 'species' argument must be mouse or human")
+  }
+
+  # make a Seurat object, normalise, run prediction
+  # note: we use Seurat's default normalisation tool for the cell phase assessment (quick and dirty). Later we will use Scran for the normal normalisation
+
+  seuratObj <- CellCycleScoring(seuratObj,
+                                s.features = geneset$s.genes,
+                                g2m.features = geneset$g2m.genes,
+                                set.ident = TRUE)
+
+  # define some graph functions which will be run with `to.pdf` later
+  fig.cellcycle.bar <- function() {
+    pdf(paste0(outdir,"/",sampleID, "_CellCycle_bar.pdf"))
+    myscale <- round(max(table(seuratObj$Phase)), -3) #scale
+    mybar <- barplot(table(seuratObj$Phase),
+                     ylim = (c(0, myscale)),
+                     main = paste0("Cell Phases in ", sampleID),
+                     xlab = "cell phase",
+                     ylab = "# cells",
+                     col = "white")
+    text(mybar,
+         table(seuratObj$Phase)+100,
+         paste("n: ", table(seuratObj$Phase), sep=""), cex = 1)
+    dev.off()
+  }
+
+  fig.cellcycle.pie <- function() {
+    pdf(paste0(outdir, "/",sampleID, "_CellCycle_pie.pdf"))
+    pie(table(seuratObj$Phase),
+        labels = table(seuratObj$Phase),
+        col = c("bisque", "cornflowerblue", "cadetblue2"),
+        main = paste0("Cell phases in ", sampleID))
+    legend("topright", c("G1", "G2M", "S"), cex = 0.8, fill = c("bisque", "cornflowerblue", "cadetblue2"))
+    dev.off()
+  }
+
+  # spatial plots
+  fig.cellcycle.spatial <- function() {
+    SpatialDimPlot(seuratObj, group.by = "Phase", pt.size.factor = 1.4) +
+      theme(legend.position = "right")
+    ggsave(paste0(outdir, "/",sampleID, "_CellCycle_spatial.pdf"))
+
+  }
+  fig.cellcycle.bar()
+  fig.cellcycle.pie()
+  fig.cellcycle.spatial()
+
+  # return the updated SCE
+  return(seuratObj)
+}
+
+p5 <- func_predictCellCycle(p5, "human", cell_cycle.outputdir, "integrated")
+
+
+phase_palate <-c("#457B9D", "#ED553B", "#F6D55C")
+#displays cell phase on spatial plot
+SpatialDimPlot(p5, group.by = 'Phase', cols = phase_palate,pt.size.factor = 1.3)+ theme(aspect.ratio = my_aspRat)
+#DimPlot(p5, reduction = "umap", group.by = "Phase", cols = phase_palate)
+
+```
+
+#### Extra patient L-R analysis performed with stlearn
+

@@ -1,0 +1,537 @@
+---
+title: "STdeconvolve"
+author: "Andrew Causer"
+date: "2023-04-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r include=FALSE}
+#libraries required for importation
+library(Seurat) #‘4.0.3’
+library(ggplot2)
+library(dplyr)
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+if (!requireNamespace("scran", quietly = TRUE))
+  install.packages("scran")
+#library(scran)
+library(scater)
+#library(PCAtools)
+library(tibble)
+library(SingleCellExperiment)
+library(hdf5r) 
+library(patchwork)
+library(gtools)
+library(clustree)
+
+#BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+#BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+#BiocManager::install("ComplexHeatmap")
+library(ComplexHeatmap)
+library(stringr)
+library(magick)
+#library(SpatialExperiment)
+library(gridExtra)
+
+
+library(EnhancedVolcano)
+library(GOplot)
+library(tidyr)
+library(circlize)
+library(readr)
+
+#remotes::install_github('JEFworks-Lab/STdeconvolve')
+library(STdeconvolve)
+
+```
+
+# Load data and Single cell reference dataset
+```{r load_data}
+
+#Visium data
+S01_old_norm <- readRDS("/Volumes/SPOPSCC-Q4358/Finalised_S01/S01_old_norm.RDS")
+S01_norm <- readRDS("/Volumes/SPOPSCC-Q4358/Finalised_S01/S01_norm.RDS")
+
+# scRNA-seq Reference data
+x<-read.table("/Users/andrewcauser/Downloads/GSE181919_Barcode_metadata.txt.gz")
+y <- read.table("/Users/andrewcauser/Downloads/GSE181919_UMI_counts.txt.gz")
+```
+
+# Reference Free Deconvolution
+  
+```{r reference_free_deconvoludion}
+decon.outputdir <- paste0(outputdir, "/Decon_SCTransform/")
+dir.create(decon.outputdir)
+  
+
+cd <-S01_old_norm@assays$SCT@counts 
+
+pos <-GetTissueCoordinates(S01_norm) #gets barcode coordinates 
+pos$imagerow <- pos$imagerow * -1
+colnames(pos) <- c("y", "x")
+  
+#cleaning and feature selection
+counts <-cleanCounts(cd, min.lib.size = 200, min.reads = 10, min.detected = 3)
+x <- log10(Matrix::colSums(counts) + 1)
+y <- log10(Matrix::rowSums(counts) + 1) 
+  
+#plots data distribution
+p1 <-ggplot(as.data.frame(x), aes(x = x)) + geom_histogram(aes(y = ..density..), bins =200, fill = "grey") + geom_density()
+p2 <-ggplot(as.data.frame(y), aes(x = y)) + geom_histogram(aes(y = ..density..), bins =200, fill = "grey") + geom_density()
+p1 + p2
+  
+#selectes overdispersed genes present in <100% of spots and >5% of spots/barcodes. Also use top 1000 most overdispersed genes
+corpus <-restrictCorpus(
+    counts,
+    removeAbove = 1.0,
+    removeBelow = 0.05,
+    nTopOD = 1000
+  )
+  
+#fiting LDA models to the data to determine optimal K for feature selection 
+ldas <- fitLDA(t(as.matrix(corpus)), Ks = c(10))
+optLDA <- optimalModel(models = ldas, opt = 10)
+results <-getBetaTheta(optLDA, perc.filt = 0.05, betaScale = 1000) 
+deconProp <- results$theta
+deconGexp <- results$beta
+  
+  
+###plot graph
+plt <- vizAllTopics(
+    theta = deconProp,
+    pos = pos,
+    r = max(0.5, max(pos) / nrow(pos) * 10),
+    lwd = 0,
+    showLegend = TRUE,
+    plotTitle = NA) +guides(fill = guide_legend(ncol = 2)) +
+  ## outer border -->
+  #geom_rect(data = data.frame(pos),aes(xmin = min(x)-50, xmax = max(x)+50, ymin = min(y)-50, ymax = max(y)+50), fill = NA, color = "black", linetype = "solid", size = 0.5) +
+  theme(plot.background = element_blank())+
+
+  ## remove the pixel "groups", which is the color aesthetic for the pixel borders -->
+  guides(colour = "none")
+  
+plt
+  
+topicCols  <- rainbow(nrow(deconGexp))
+gs1 <- lapply(1:ncol(deconProp), function(i) {
+
+      g1 <- vizTopic(
+        theta = deconProp,
+        pos = pos,
+        topic = i,
+        plotTitle = paste0('topic ', i),
+        size = 1,
+        stroke = 0.05,
+        alpha = 1,
+        low = "white",
+        high = topicCols[i],
+        showLegend = FALSE
+      ) 
+      
+      return(g1) 
+  })
+
+library(gridExtra)
+do.call("grid.arrange", c(gs1, ncol = 4))
+```
+
+
+# Visualise Each Topic Cluster
+```{r display_each_topic_group}
+ps <- lapply(colnames(deconProp), function(celltype) {
+  
+  vizTopic(theta = deconProp, pos = pos, topic = celltype, plotTitle = paste0("X", celltype),
+         size = 2, stroke = 1, alpha = 0.5,
+         low = "white",
+         high = "red") +
+    
+    ## remove the pixel "Groups", which is the color aesthetic for the pixel borders
+    ggplot2::guides(colour = "none")
+  
+})
+pdf(paste0(decon.outputdir, "S01_Decon_indiviudal_Topic.pdf"))
+  grid.arrange(grobs = ps,layout_matrix = rbind(c(1, 2, 3, 4),
+                         c(5, 6, 7, 8),
+                         c(9, 10))
+)
+dev.off()
+ps
+```
+
+# Visualise Topic cluster marker genes
+```{r visualise_marker_genes}
+
+DE <- lapply(colnames(deconProp), function(celltype) {
+  
+  celltype <- as.numeric(celltype)
+  ## highly expressed in cell-type of interest
+  highgexp <- names(which(deconGexp[celltype,] > 3))
+  ## high log2(fold-change) compared to other deconvolved cell-types
+  log2fc <- sort(log2(deconGexp[celltype,highgexp]/colMeans(deconGexp[-celltype,highgexp])), decreasing=TRUE)
+  log2fc
+})
+  
+ps <- function(celltype,log2fc){
+  
+  markers <- names(log2fc)[1] ## label just the top gene
+  
+  # -----------------------------------------------------
+  ## visualize the transcriptional profile
+  dat <- data.frame(values = as.vector(log2fc), genes = names(log2fc), order = seq(length(log2fc)))
+  # Hide all of the text labels.
+  dat$selectedLabels <- ""
+  dat$selectedLabels[1] <- markers
+  
+  plt <- ggplot2::ggplot(data = dat) +
+    ggplot2::geom_col(ggplot2::aes(x = order, y = values,
+                                   fill = factor(selectedLabels == ""),
+                                   color = factor(selectedLabels == "")), width = 1) +
+    
+    ggplot2::scale_fill_manual(values = c("darkblue",
+                                          "darkblue"
+                                          )) +
+    ggplot2::scale_color_manual(values = c("darkblue",
+                                          "darkblue"
+                                          )) +
+    
+    #ggplot2::scale_y_continuous(expand = c(0, 0), limits = c(min(log2fc) - 0.3, max(log2fc) + 0.3)) +
+    # ggplot2::scale_x_continuous(expand = c(0, 0), limits = c(-2, NA)) +
+    
+    ggplot2::labs(title = paste0("X", celltype),
+                  x = "Gene expression rank",
+                  y = "log2(FC)") +
+    
+    ## placement of gene symbol labels of top genes
+    ggplot2::geom_text(ggplot2::aes(x = order+1, y = values-0.1, label = selectedLabels), color = "red") +
+    
+    ggplot2::theme_classic() +
+    ggplot2::theme(axis.text.x = ggplot2::element_text(size=15, color = "black"),
+                   axis.text.y = ggplot2::element_text(size=15, color = "black"),
+                   axis.title.y = ggplot2::element_text(size=15, color = "black"),
+                   axis.title.x = ggplot2::element_text(size=15, color = "black"),
+                   axis.ticks.x = ggplot2::element_blank(),
+                   plot.title = ggplot2::element_text(size=15),
+                   legend.text = ggplot2::element_text(size = 15, colour = "black"),
+                   legend.title = ggplot2::element_text(size = 15, colour = "black", angle = 90),
+                   panel.background = ggplot2::element_blank(),
+                   plot.background = ggplot2::element_blank(),
+                   panel.grid.major.y = ggplot2::element_line(size = 0.3, colour = "gray80"),
+                   axis.line = ggplot2::element_line(size = 1, colour = "black"),
+                   legend.position="none"
+                   )
+ return(plt)
+}
+
+ps
+
+```
+
+
+# looks at gene expression for most upregulated gene
+```{r DE_gene_expression}
+c <- counts
+df <- merge(as.data.frame(pos), 
+            as.data.frame(t(as.matrix(c))), 
+            by = 0)
+
+## collect the top genes for subsequent visualization
+markerGenes <- unlist(lapply(colnames(deconProp), function(celltype) {
+  
+  celltype <- as.numeric(celltype)
+  ## highly expressed in cell-type of interest
+  highgexp <- names(which(deconGexp[celltype,] > 3))
+  ## high log2(fold-change) compared to other deconvolved cell-types
+  log2fc <- sort(log2(deconGexp[celltype,highgexp]/colMeans(deconGexp[-celltype,highgexp])), decreasing=TRUE)
+  markers <- names(log2fc)[1] ## label just the top gene
+  ## collect name of top gene for each cell-type
+  markers
+}))
+  
+
+## now visualize top genes for each deconvolved cell-type
+ps <- lapply(markerGenes, function(marker) {
+  vizGeneCounts(df = df,
+              gene = marker,
+              # groups = annot,
+              # group_cols = rainbow(length(levels(annot))),
+              size = 2, stroke = 0.1,
+              plotTitle = marker,
+              winsorize = 0.05,
+              showLegend = TRUE) +
+    
+    ## remove the pixel "groups", which is the color aesthetic for the pixel borders
+    ggplot2::guides(colour = "none") +
+    
+    ## change some plot aesthetics
+    ggplot2::theme(axis.text.x = ggplot2::element_text(size=0, color = "black", hjust = 0, vjust = 0.5),
+                   axis.text.y = ggplot2::element_text(size=0, color = "black"),
+                   axis.title.y = ggplot2::element_text(size=15),
+                   axis.title.x = ggplot2::element_text(size=15),
+                   plot.title = ggplot2::element_text(size=15),
+                   legend.text = ggplot2::element_text(size = 15, colour = "black"),
+                   legend.title = ggplot2::element_text(size = 15, colour = "black", angle = 90),
+                   panel.background = ggplot2::element_blank(),
+                   ## border around plot
+                   panel.border = ggplot2::element_rect(fill = NA, color = "black", size = 2),
+                   plot.background = ggplot2::element_blank()
+                   ) +
+    ggplot2::guides(fill = ggplot2::guide_colorbar(title = "Counts",
+                                                   title.position = "left",
+                                                   title.hjust = 0.5,
+                                                   ticks.colour = "black",
+                                                   ticks.linewidth = 2,
+                                                   frame.colour= "black",
+                                                   frame.linewidth = 2,
+                                                   label.hjust = 0
+                                                   ))
+})
+#pdf(paste0(decon.outputdir, "S01_Decon_topGene.pdf"))
+#gridExtra::grid.arrange(
+  #grobs = ps,
+  #layout_matrix = rbind(c(1, 2, 3, 4),
+                        #c(5, 6, 7, 8),
+                        #c(9, 10, 11, 12),
+                        #c(13, 14, 15, 16))
+#)
+#dev.off()
+ps
+```
+
+
+```{r compare_decon_topics_to_clusters}
+
+
+#use Data from original cluster
+S02 <- FindVariableFeatures(S01_norm, assay = "SCT", selection.method = "vst", nfeatures = 2000)
+S02 <- ScaleData(S02)
+S02 <- RunPCA(S02,verbose = FALSE)
+S02 <- FindNeighbors(S02, dims = 1:50)
+S02 <- RunTSNE(S02, reduction = "pca", dims = 1:50)
+S02 <- RunUMAP(S02, reduction = "pca", dims = 1:50)
+
+emb <- S02@reductions$tsne@cell.embeddings
+colnames(emb) <- c("x", "y")
+
+
+
+com <- S01_norm$cluster
+tempCom <- com
+dat <- data.frame("emb1" = pos[,"x"],
+                   "emb2" = pos[,"y"],
+                   "Cluster" = tempCom)
+
+
+plt <- ggplot2::ggplot(data = dat) +
+  ggplot2::geom_point(ggplot2::aes(x = emb1, y = emb2,
+                                   color = Cluster), size = 0.8) +
+  
+  ggplot2::scale_color_manual(values = rainbow(n = length(levels(tempCom)))) +
+  
+  # ggplot2::scale_y_continuous(expand = c(0, 0), limits = c( min(dat$emb2)-1, max(dat$emb2)+1)) +
+  # ggplot2::scale_x_continuous(expand = c(0, 0), limits = c( min(dat$emb1)-1, max(dat$emb1)+1) ) +
+  
+  ggplot2::labs(title = "",
+                x = "x",
+                y = "y") +
+  
+  ggplot2::theme_classic() +
+  ggplot2::theme(axis.text.x = ggplot2::element_text(size=15, color = "black"),
+                 axis.text.y = ggplot2::element_text(size=15, color = "black"),
+                 axis.title.y = ggplot2::element_text(size=15),
+                 axis.title.x = ggplot2::element_text(size=15),
+                 axis.ticks.x = ggplot2::element_blank(),
+                 plot.title = ggplot2::element_text(size=15),
+                 legend.text = ggplot2::element_text(size = 12, colour = "black"),
+                 legend.title = ggplot2::element_text(size = 15, colour = "black", angle = 0, hjust = 0.5),
+                 panel.background = ggplot2::element_blank(),
+                 plot.background = ggplot2::element_blank(),
+                 panel.grid.major.y =  ggplot2::element_blank(),
+                 axis.line = ggplot2::element_line(size = 1, colour = "black")
+                 # legend.position="none"
+                 ) +
+  
+  ggplot2::guides(colour = ggplot2::guide_legend(override.aes = list(size=2), ncol = 2)
+                  ) +
+  
+  ggplot2::coord_equal()
+
+plt
+```
+
+```{r generate_topic_cluster_comp}
+tempCom <- com
+
+dat <- data.frame("emb1" = emb[,1],
+                  "emb2" = emb[,2],
+                  "Cluster" = tempCom)
+
+## cluster labels
+cent.pos <- do.call(rbind, tapply(1:nrow(emb), tempCom, function(ii) apply(emb[ii,,drop=F],2,median)))
+cent.pos <- as.data.frame(cent.pos)
+colnames(cent.pos) <- c("x", "y")
+cent.pos$cluster <- rownames(cent.pos)
+cent.pos <- na.omit(cent.pos)
+
+plt <- ggplot2::ggplot(data = dat) +
+  ggplot2::geom_point(ggplot2::aes(x = emb1, y = emb2,
+                                   color = Cluster), size = 0.01) +
+  
+  ggplot2::scale_color_manual(values = rainbow(n = length(levels(tempCom)))) +
+  
+  ggplot2::scale_y_continuous(expand = c(0, 0), limits = c( min(dat$emb2)-1, max(dat$emb2)+1)) +
+  ggplot2::scale_x_continuous(expand = c(0, 0), limits = c( min(dat$emb1)-1, max(dat$emb1)+1) ) +
+  
+  ggplot2::labs(title = "",
+                x = "t-SNE 1",
+                y = "t-SNE 2") +
+  
+  ggplot2::theme_classic() +
+  ggplot2::theme(axis.text.x = ggplot2::element_text(size=15, color = "black"),
+                 axis.text.y = ggplot2::element_text(size=15, color = "black"),
+                 axis.title.y = ggplot2::element_text(size=15),
+                 axis.title.x = ggplot2::element_text(size=15),
+                 axis.ticks.x = ggplot2::element_blank(),
+                 plot.title = ggplot2::element_text(size=15),
+                 legend.text = ggplot2::element_text(size = 12, colour = "black"),
+                 legend.title = ggplot2::element_text(size = 15, colour = "black", angle = 0, hjust = 0.5),
+                 panel.background = ggplot2::element_blank(),
+                 plot.background = ggplot2::element_blank(),
+                 panel.grid.major.y =  ggplot2::element_blank(),
+                 axis.line = ggplot2::element_line(size = 1, colour = "black")
+                 # legend.position="none"
+                 ) +
+  
+  ggplot2::geom_text(data = cent.pos,
+                     ggplot2::aes(x = x,
+                                  y = y,
+                                  label = cluster),
+                     fontface = "bold") +
+  
+  ggplot2::guides(colour = ggplot2::guide_legend(override.aes = list(size=2), ncol = 2)
+                  ) +
+  
+  ggplot2::coord_equal()
+
+plt
+
+ps <- lapply(colnames(deconProp), function(celltype) {
+  
+  vizTopic(theta = deconProp, pos = emb, topic = celltype, plotTitle = paste0("X", celltype),
+         size = 1, stroke = 0.5, alpha = 0.5,
+         low = "white",
+         high = "red") +
+    
+    ## remove the pixel "Groups", which is the color aesthetic for the pixel borders
+    ggplot2::guides(colour = "none")
+  
+})
+gridExtra::grid.arrange(
+  grobs = ps,
+  layout_matrix = rbind(c(1, 2, 3, 4),
+                        c(5, 6, 7, 8),
+                        c(9, 10))
+)
+```
+
+
+```{r combined_decon}
+com_proxyTheta <- model.matrix(~ 0 + com)
+#remove "unassinged" column
+com_proxyTheta <- com_proxyTheta[,1:11]
+rownames(com_proxyTheta) <- names(com)
+# fix names
+colnames(com_proxyTheta) <- unlist(lapply(colnames(com_proxyTheta), function(x) {
+  unlist(strsplit(x, "com"))[2]
+}))
+com_proxyTheta <- as.data.frame.matrix(com_proxyTheta)
+com_proxyTheta[1:5,1:5]
+
+corMat_prop <- STdeconvolve::getCorrMtx(m1 = as.matrix(com_proxyTheta),
+                                        m2 = deconProp,
+                                        type = "t")
+rownames(corMat_prop) <- paste0("com_", seq(nrow(corMat_prop)))
+colnames(corMat_prop) <- paste0("decon_", seq(ncol(corMat_prop)))
+
+## order the cell-types rows based on best match (highest correlation) with each community 
+pairs <- STdeconvolve::lsatPairs(corMat_prop[1:10,])
+m <- corMat_prop[pairs$rowix, pairs$colsix]
+
+pdf(paste0(decon.outputdir, "S01_Decon_cluster_vs_topics.pdf"))
+STdeconvolve::correlationPlot(mat = m,
+                              colLabs = "Transcriptional clusters",
+                              rowLabs = "STdeconvolve",
+                              annotation = TRUE) +
+  ggplot2::theme(
+    axis.text.x = ggplot2::element_text(angle = 90)
+)
+dev.off()
+STdeconvolve::correlationPlot(mat = m,
+                              colLabs = "Transcriptional clusters",
+                              rowLabs = "STdeconvolve",
+                              annotation = TRUE) +
+  ggplot2::theme(
+    axis.text.x = ggplot2::element_text(angle = 90))
+```
+
+
+# Pre-processing of Single Cell Dataset 
+```{r inport_dataset}
+
+colnames(y) <- gsub("\\.","-",colnames(y))
+x_y <- CreateSeuratObject(counts = y, meta.data = x)
+sort(table(x_y@meta.data$cell.type))
+barplot(sort(table(x_y@meta.data$cell.type)), las = 2)
+
+x_y[['Barcode']] <- rownames(x_y@meta.data)
+
+Idents(x_y) <- "cell.type"
+
+x_y_T <- SCTransform(x_y, assay = "RNA", verbose = FALSE)
+
+cell_markers_xy <- FindAllMarkers(x_y_T, assay = "SCT", slot = "data", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+```
+
+# Use Reference single cell dataset to generate gene list
+
+```{r decon_ref_free}
+top20_xy <- cell_markers_xy %>% group_by(cluster) %>% arrange(-avg_log2FC) %>% dplyr::slice(1:30)
+
+cell_list_8 <- lapply(unique(top20_xy$cluster), function(i){
+  j <- which(top20_xy$cluster == i)
+  unique(unlist(lapply(j, function(x) top20_xy$gene[x])))
+})
+names(cell_list_8) <- unique(top20_xy$cluster)
+celltype_annotations <- annotateCellTypesGSEA(beta = deconGexp, gset = cell_list_8, qval = 0.05)
+gs2 <- lapply(1:ncol(deconProp), function(i) {
+  g1 <- vizTopic(theta = deconProp, pos = pos, topic = i, 
+                 plotTitle = paste0('Topic ', i, ':\n', celltype_annotations$predictions[i]),
+                 size = 1, stroke = 0.1, alpha = 1,
+                 low = "white",
+                 high = topicCols[i],
+                 showLegend = FALSE) +
+    ggplot2::theme(title =ggplot2::element_text(size=6, face='bold'))
+  return(g1)
+})
+library(gridExtra)
+do.call("grid.arrange", c(gs2, ncol=4))
+
+
+
+cell_predictions <- c()
+for (i in celltype_annotations$predictions){
+  cell_predictions <- c(cell_predictions, i)
+}
+
+ref_free <- deconProp
+colnames(ref_free) <- cell_predictions
+write.csv(ref_free, file = "/Volumes/SPOPSCC-Q4358/Andrew_decon_folder/ref_free_results.csv")
+```
+

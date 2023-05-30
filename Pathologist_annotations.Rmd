@@ -1,0 +1,52 @@
+---
+title: "Pathologist_annotations"
+author: "Andrew Causer"
+date: "2023-04-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+#libraries required for importation
+library(Seurat) #‘4.0.3’
+library(ggplot2)
+library(dplyr)
+```
+
+# Ploting of pathologist annotations generated on 10x Loupe Browser
+
+```{r pathologist_annotations}
+#Import data
+path_old <- read.csv("/Volumes/SPOPSCC-Q4358/Case Report/PathologistAnnotation/Histo.csv")
+path_new <- read.csv("/Volumes/SPOPSCC-Q4358/Case Report/PathologistAnnotation/Histo_new.csv")
+path_new_reannotated <- read.csv("/Volumes/SPOPSCC-Q4358/Case Report/PathologistAnnotation/Histo_reannotated.csv")
+
+
+seuratObjS01 <- readRDS("/Volumes/SPOPSCC-Q4358/Finalised_S01/seuratObjS01.RDS")
+seuratObjS01new <- readRDS("/Volumes/SPOPSCC-Q4358/Finalised_S01/seuratObjS01new.RDS")
+```
+
+
+# Plot annotations
+
+```{r plot_annotations}
+rownames(path_old) <- path_old$Barcode
+rownames(path_new) <- path_new$Barcode
+rownames(path_new_reannotated) <- path_new_reannotated$Barcode
+
+path_annotation_old <- AddMetaData(seuratObjS01,metadata = path_old$Histo, "pathologist_annotation")
+path_annotation_new <- AddMetaData(seuratObjS01new,metadata = path_new$Histo, "pathologist_annotation")
+path_annotation_new <- AddMetaData(path_annotation_new, metadata = path_new_reannotated$Histo, "pathologist_REannotation")
+
+
+Path_pal <- c("grey","#F083B5","#A65628","#F5EE36","#F57F20","#984F9F","#4AB049","#337FBA","#E41E26")
+SpatialDimPlot(path_annotation_new, group.by = "pathologist_annotation", pt.size.factor = 1.5#, cols = c("grey","grey","#F083B5","#A65628","#F57F20","#984F9F","#F5EE36","#E41E26")
+               )+theme(aspect.ratio = myratio_new)
+
+SpatialDimPlot(path_annotation_new, group.by = "pathologist_REannotation", pt.size.factor = 1.4, cols = c("grey","grey","#F083B5","#A65628","aquamarine3","#F57F20","#337FBA","#F5EE36","#E41E26"))+theme(aspect.ratio = myratio_new)
+
+SpatialDimPlot(path_annotation_old, group.by = "pathologist_annotation", pt.size.factor = 1.2, cols = Path_pal)
+```

@@ -1,0 +1,157 @@
+---
+title: "Untitled"
+output: html_document
+date: "2023-04-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r include=FALSE}
+#libraries required for importation
+library(Seurat) #‘4.0.3’
+library(ggplot2)
+library(dplyr)
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+if (!requireNamespace("scran", quietly = TRUE))
+  install.packages("scran")
+#library(scran)
+library(scater)
+#library(PCAtools)
+library(tibble)
+library(SingleCellExperiment)
+library(hdf5r) 
+library(patchwork)
+library(gtools)
+library(clustree)
+
+#BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+#BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+#BiocManager::install("ComplexHeatmap")
+library(ComplexHeatmap)
+library(stringr)
+library(magick)
+#library(SpatialExperiment)
+library(gridExtra)
+
+
+library(EnhancedVolcano)
+library(GOplot)
+library(tidyr)
+library(circlize)
+library(readr)
+#devtools::install_github('YingMa0107/CARD')
+library(CARD)
+```
+
+# Load data and Single cell reference dataset
+```{r load_data}
+
+#Visium data
+S01_old_norm <- readRDS("/Volumes/SPOPSCC-Q4358/Finalised_S01/S01_old_norm.RDS")
+
+# scRNA-seq Reference data
+x<-read.table("/Users/andrewcauser/Downloads/GSE181919_Barcode_metadata.txt.gz")
+y <- read.table("/Users/andrewcauser/Downloads/GSE181919_UMI_counts.txt.gz")
+```
+
+
+# Pre-processing of Single Cell Dataset 
+```{r inport_dataset}
+
+colnames(y) <- gsub("\\.","-",colnames(y))
+x_y <- CreateSeuratObject(counts = y, meta.data = x)
+sort(table(x_y@meta.data$cell.type))
+barplot(sort(table(x_y@meta.data$cell.type)), las = 2)
+
+x_y[['Barcode']] <- rownames(x_y@meta.data)
+
+Idents(x_y) <- "cell.type"
+
+x_y_T <- SCTransform(x_y, assay = "RNA", verbose = FALSE)
+
+cell_markers_xy <- FindAllMarkers(x_y_T, assay = "SCT", slot = "data", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+```
+
+# Visium data preprocessing for deconvolution
+```{r visium_preprocess_decon}
+x_y_T <- FindVariableFeatures(x_y_T, selection.method = "vst", nfeatures = 2000,
+        verbose = FALSE, assay = "SCT")
+x_y_T <- RunPCA(x_y_T, npcs = 30, verbose = FALSE)
+x_y_T <- RunUMAP(x_y_T, reduction = "pca", dims = 1:30)
+
+
+visium_data <- RunPCA(S01_old_norm, npcs = 30, verbose = FALSE)
+visium_data <- RunUMAP(visium_data, reduction = "pca", dims = 1:30)
+DimPlot(x_y_T, reduction = "umap", group.by = "cell.type", label = TRUE) #+ NoLegend()
+
+Idents(visium_data) <- "cluster"
+```
+
+
+# Run CARD
+```{r run_CARD}
+s_t <- subset(S01_old_norm, ident ="tumour" )
+
+sc_count<- x_y@assays$RNA@counts
+sc_meta <- x_y@meta.data
+rownames(sc_meta) <- colnames(sc_count)
+
+spatial_count<-s_t@assays$Spatial@counts
+tiss_coord <- GetTissueCoordinates(s_t)
+tiss_coord$x <- tiss_coord$imagecol
+tiss_coord$y <- tiss_coord$imagerow
+tiss_coord <- tiss_coord[,-2:-1]
+rownames(tiss_coord) <- colnames(spatial_count)
+sc_meta$sampleInfo <- rep("sample1", length(sc_meta$cell.type))
+
+
+CARD_obj = createCARDObject(
+	sc_count = sc_count,
+	sc_meta = sc_meta,
+	spatial_count = spatial_count,
+	spatial_location = tiss_coord,
+	ct.varname = "cell.type",
+	ct.select = NULL,
+	sample.varname = "sampleInfo",
+	minCountGene = 100,
+	minCountSpot = 5) 
+
+CARD_obj = CARD_deconvolution(CARD_object = CARD_obj)
+
+p1 <- CARD.visualize.pie(proportion = CARD_obj@Proportion_CARD,spatial_location = CARD_obj@spatial_location)
+print(p1)
+cols <- c("brown","#1B9E77", "#D95F02", "#7570B3", "blue", "#66A61E", "#E6AB02", "#A6761D","#666666","#E7298A")
+zoom_in <- CARD_obj@spatial_location
+zoom_in$x <- (zoom_in$x) *0.15
+zoom_in$y <- (zoom_in$y) *-0.15
+p1.1 <- CARD.visualize.pie(proportion = CARD_obj@Proportion_CARD,spatial_location = zoom_in, colors = cols)
+print(p1.1)
+
+ct.visualize = unique(sc_meta$cell.type)
+
+p2 <- CARD.visualize.prop(
+	proportion = CARD_obj@Proportion_CARD,        
+	spatial_location = CARD_obj@spatial_location, 
+	ct.visualize = ct.visualize,                 ### selected cell types to visualize
+	colors = c("lightblue","lightyellow","red"), ### if not provide, we will use the default colors
+	NumCols = 4)                                 ### number of columns in the figure panel
+print(p2)
+
+
+p3 <- CARD.visualize.Cor(CARD_obj@Proportion_CARD,colors = NULL) # if not provide, we will use the default colors
+print(p3)
+
+```
+
+
+
+
+
+
+

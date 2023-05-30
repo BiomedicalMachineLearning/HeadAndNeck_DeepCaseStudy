@@ -1,0 +1,1743 @@
+---
+title: "SEP21_OPSCC_analysis"
+author: "Andrew Causer"
+date: "2023-04-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r include=FALSE}
+#libraries required for importation
+library(Seurat) #‘4.0.3’
+library(ggplot2)
+library(dplyr)
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+if (!requireNamespace("scran", quietly = TRUE))
+  install.packages("scran")
+#library(scran)
+library(scater)
+#library(PCAtools)
+library(tibble)
+library(SingleCellExperiment)
+library(hdf5r) 
+library(patchwork)
+library(gtools)
+library(clustree)
+
+#BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+#BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+#BiocManager::install("ComplexHeatmap")
+library(ComplexHeatmap)
+library(stringr)
+library(magick)
+#library(SpatialExperiment)
+library(gridExtra)
+
+#remotes::install_github('JEFworks-Lab/MERINGUE')
+library(MERINGUE)
+library(EnhancedVolcano)
+library(GOplot)
+library(tidyr)
+library(circlize)
+
+library(readr)
+```
+
+# Set up working directories
+
+```{r include=FALSE}
+wd = "/Volumes/SPOPSCC-Q4358/"
+datadir = paste0("/Volumes/SPOPSCC-Q4358/Visium_FFPE_Jaz_2/")
+datadir1 = paste0("/Volumes/SPOPSCC-Q4358/Visium_FFPE_54_newS01/A1_VLP54_S01_new/outs/")
+datadir2 = paste0("/Volumes/SPOPSCC-Q4358/FFPE_CSV_JAZ/")
+outputdir.new <- paste0(outputdir,"/Old_New_S01")
+dir.create(outputdir.new)
+```
+
+# Load Data New S01
+```{r laod_object_new, warning=FALSE}
+seuratObjS01new <- Load10X_Spatial(datadir1, filename = "filtered_feature_bc_matrix.h5", assay = "Spatial", slice = "S01Array")
+
+seuratObjS01_ss <- readRDS("/Volumes/SPOPSCC-Q4358/Finalised_S01/seuratObjS01_ss.RDS")
+
+Idents(seuratObjS01_ss) <- "sample"
+seuratObjS01old <- subset(seuratObjS01_ss, ident = "tumour")
+```
+
+
+# Identify Tumour and Healthy Sample spots
+```{r spot_identification_new}
+new_S01_spots <- read.delim(paste0(datadir1, "/new_S01.csv"), sep=",")
+seuratObjS01new[['Barcode']] <- new_S01_spots$Barcode
+seuratObjS01new[['tissue']] <- new_S01_spots$new_S01
+```
+
+
+# Red tissue sample looks poor and needs to be removed
+```{r remove_poor_sample_new}
+
+#add in Old/new annotations for seurat objects
+meta <- seuratObjS01old[["tissue"]]
+meta$S01 <- meta$tissue
+meta$S01 <- sub(".*", "old", meta$S01)
+seuratObjS01old <- AddMetaData(seuratObjS01old, meta)
+
+
+seuratObjS01new_ss <- subset(seuratObjS01new, (tissue>0))
+meta <- seuratObjS01new_ss[["tissue"]]
+meta$sample <- meta$tissue
+meta$sample <- gsub(".*", "tumour", meta$sample)
+seuratObjS01new_ss <- AddMetaData(seuratObjS01new_ss, meta)
+
+meta$S01 <- meta$tissue
+meta$S01 <- gsub(".*", "new", meta$S01)
+seuratObjS01new_ss <- AddMetaData(seuratObjS01new_ss, meta)
+```
+
+
+# merge new and old data
+
+```{r merge_new_old, warning=FALSE}
+merged.data <- merge(seuratObjS01old, y = c(seuratObjS01new_ss), add.cell.ids = c("Old","New"))
+
+plot1 <- VlnPlot(merged.data, features = "nCount_Spatial", pt.size = 0.1) + NoLegend()
+plot2 <- VlnPlot(merged.data, features = "nFeature_Spatial", pt.size = 0.1) + NoLegend()
+wrap_plots(plot1, plot2)
+#ggsave(paste0(outputdir, "/seuratObjS01.pdf" ))
+
+SpatialPlot(merged.data, group.by = "S01")
+
+```
+
+
+# data QC -> filter dataset
+Red = lower threshold (-3*MAD)
+Blue = upper threshold ( +3*MAD)
+Green = generic threshold (100 reads/genes)
+
+```{r MAD_plots_new}
+filter_data_pots <- function(sr_ob, outdir, sampleID) {
+ 
+  log_low_ncount_threshold = median(log(sr_ob$nCount_Spatial)) - 3*mad(log(sr_ob$nCount_Spatial))
+  log_high_ncount_threshold = median(log(sr_ob$nCount_Spatial)) + 3*mad(log(sr_ob$nCount_Spatial))
+  log_low_nfeature_threshold = median(log(sr_ob$nFeature_Spatial)) - 3*mad(log(sr_ob$nFeature_Spatial))
+  log_high_nfeature_threshold = median(log(sr_ob$nFeature_Spatial)) + 3*mad(log(sr_ob$nFeature_Spatial))
+  
+  low_ncount_threshold = median(sr_ob$nCount_Spatial) - 3*mad(sr_ob$nCount_Spatial)
+  high_ncount_threshold = median(sr_ob$nCount_Spatial) + 3*mad(sr_ob$nCount_Spatial)
+  low_nfeature_threshold = median(sr_ob$nFeature_Spatial)- 3*mad(sr_ob$nFeature_Spatial)
+  high_nfeature_threshold = median(sr_ob$nFeature_Spatial) + 3*mad(sr_ob$nFeature_Spatial)
+  
+  
+  ncount_norm <- ggplot(sr_ob@meta.data, aes(x=nCount_Spatial))+geom_histogram(aes(y=..density..),bins=200,fill="grey")+geom_density() +geom_vline(aes(xintercept=low_ncount_threshold),color = "red") +geom_vline(aes(xintercept=high_ncount_threshold),color = "blue") + geom_vline(aes(xintercept=100), color = "green")
+  
+  ncount_log <- ggplot(sr_ob@meta.data, aes(x=log(nCount_Spatial)))+geom_histogram(aes(y=..density..),bins=200,fill="grey")+geom_density() +geom_vline(aes(xintercept=log_low_ncount_threshold),color = "red") +geom_vline(aes(xintercept=log_high_ncount_threshold),color = "blue") + geom_vline(aes(xintercept= log(100)), color = "green")
+  
+    nfeature_norm <- ggplot(sr_ob@meta.data, aes(x=nFeature_Spatial))+geom_histogram(aes(y=..density..),bins=200,fill="grey")+geom_density() +geom_vline(aes(xintercept=low_nfeature_threshold),color = "red") +geom_vline(aes(xintercept=high_nfeature_threshold),color = "blue")+ geom_vline(aes(xintercept=100), color = "green") 
+ 
+    nfeature_log <- ggplot(sr_ob@meta.data, aes(x=log(nFeature_Spatial)))+geom_histogram(aes(y=..density..),bins=200,fill="grey")+geom_density() +geom_vline(aes(xintercept=log_low_nfeature_threshold),color = "red") +geom_vline(aes(xintercept=log_high_nfeature_threshold),color = "blue") + geom_vline(aes(xintercept= log(100)), color = "green")
+  
+    ncount_norm+ncount_log+nfeature_norm+nfeature_log+labs(caption =  paste0("LRT: ",format(round(low_ncount_threshold,2),nsmall=2), ", HRT: ", format(round(high_ncount_threshold,2),nsmall=2), ", LFT: ",format(round(low_nfeature_threshold,2),nsmall=2), ", HFT: ", format(round(high_nfeature_threshold,2),nsmall=2), "  /   LOG -> ","LRT: ",format(round(log_low_ncount_threshold,2),nsmall=2), ", HRT: ", format(round(log_high_ncount_threshold,2),nsmall=2), ", LFT: ",format(round(log_low_nfeature_threshold,2),nsmall=2), ", HFT: ", format(round(log_high_nfeature_threshold,2),nsmall=2)))
+}
+
+filter_data_pots(seuratObjS01new_ss, outputdir.new, "new_tumour")
+
+```
+
+# Remove Outlyer spots
+
+spots with low read and gene counts were removed, also genes present in <3 spots were also removed
+```{r filter_poor_cells_new}
+
+filter_data <- function(sr_ob, outdir, sampleID) {
+
+
+  selected_f <-rownames(sr_ob)[Matrix::rowSums(sr_ob)>3] #filters genes which are expressed in atleast 3 cells
+  removed_f <-rownames(sr_ob)[Matrix::rowSums(sr_ob)<=3]
+  
+  write.table(removed_f, file = paste0(outdir, "/",sampleID, "_removed_genes.txt"), sep = "\t", quote = FALSE, col.names = NA)
+ 
+  data.filt <-subset(sr_ob, features = selected_f)
+  
+  #note: replace type with "both" -> DO I LOG TRANSFORM BEFORE FILTERING?
+  mad_reads.low <- isOutlier(data.filt$nCount_Spatial, nmads = 3, type = "lower")
+  mad_reads.high <- isOutlier(data.filt$nCount_Spatial, nmads = 3, type = "higher")
+  mad_gene.low <- isOutlier(data.filt$nFeature_Spatial, nmads = 3, type = "lower")
+  mad_gene.high <- isOutlier(data.filt$nFeature_Spatial, nmads = 3, type = "higher")
+  
+  
+  log_mad_reads.low <- isOutlier(data.filt$nCount_Spatial, nmads = 3, type = "lower", log = TRUE)
+  log_mad_reads.high <- isOutlier(data.filt$nCount_Spatial, nmads = 3, type = "higher", log = TRUE)
+  log_mad_gene.low <- isOutlier(data.filt$nFeature_Spatial, nmads = 3, type = "lower", log = TRUE)
+  log_mad_gene.high <- isOutlier(data.filt$nFeature_Spatial, nmads = 3, type = "higher", log = TRUE)
+  
+  
+  total.low <- mad_reads.low|mad_gene.low
+  total.high<-mad_reads.high|mad_gene.high
+  total.log.low <- log_mad_reads.low|log_mad_gene.low
+  total.log.high <-log_mad_reads.high|log_mad_gene.high
+
+  data.filt <- AddMetaData(data.filt, total.low, col.name = "low_outlyers")
+  data.filt <- AddMetaData(data.filt, total.high, col.name = "high_outlyers")
+  data.filt <- AddMetaData(data.filt, total.log.low, col.name = "LOG_low_outlyers")
+  data.filt <- AddMetaData(data.filt, total.log.high, col.name = "LOG_high_outlyers")
+ 
+
+
+  df <- data.frame(QCtype = c("RawTotalReads","RawTotalGenes","HighReadCounts","LowReadCounts","HighGene","LowGene","Gene_In_<3_Cells"), value= c(length(Cells(data.filt)),length(rownames(data.filt)),sum(mad_reads.high),sum(mad_reads.low),sum(mad_gene.high), sum(mad_gene.low), length(removed_f)))
+
+   plot1 <- ggplot(data=df, aes(x = QCtype, y = value)) + geom_bar(stat = "identity", fill = "steelblue") + geom_text(aes(label = value), vjust = -0.3, size = 3.5)
+   
+  
+  #discard <- mad_reads.low|mad_gene.low # just removed low reads and genes
+  #discard <- total.log.low
+
+  #Remove poor quality data
+  #filtered <- data.filt[,which(discard == "FALSE")]
+  filtered <- subset(data.filt, subset = nFeature_Spatial > 200) #filters cells which have more then 200 genes detected
+  plot2 <- SpatialDimPlot(filtered, group.by = "tissue")
+  plot3 <- SpatialDimPlot(data.filt,group.by = "tissue")
+  plot1|(plot2/plot3)
+  ggsave(paste0(outdir,"/",sampleID, "_QC_removed_values_nonlog.pdf" ))
+  #g1 = ggplot(as.data.frame())
+  
+  
+  return(filtered)
+}
+
+# outputdir1 <- paste0(outputdir,"/Data_QC")
+# dir.create(outputdir1)
+
+
+seuratObjS01new_ss<-filter_data(seuratObjS01new_ss,outputdir.new,"new_S01")
+
+
+
+check_outlyers <- function(sr_ob) {
+  p1 <- SpatialDimPlot(sr_ob, group.by = "low_outlyers")
+  p2 <- SpatialDimPlot(sr_ob, group.by = "high_outlyers")
+  p3 <- SpatialDimPlot(sr_ob, group.by = "LOG_low_outlyers")
+  p4 <- SpatialDimPlot(sr_ob, group.by = "LOG_high_outlyers")
+  p1+p2+p3+p4
+}
+
+
+new_S01 <- seuratObjS01new_ss
+check_outlyers(new_S01)
+```
+
+
+# Data QC of both seurat objects
+```{r recheck_data_QC, warning=FALSE}
+seuratObjS01_ss_outlyer <- merge(seuratObjS01old, y=c(new_S01), add.cell.ids = c("old_tumour","new_tumour"))
+
+plot1 <- VlnPlot(seuratObjS01_ss_outlyer, features = "nCount_Spatial", group.by = "tissue", pt.size = 0.1)  & theme(axis.title.x = element_blank()) + NoLegend()
+plot2 <- SpatialFeaturePlot(seuratObjS01_ss_outlyer, features = "nCount_Spatial") + theme(legend.position = "right")
+wrap_plots(plot1, plot2)
+
+plot3 <- VlnPlot(seuratObjS01_ss_outlyer, features = "nFeature_Spatial", group.by = "tissue", pt.size = 0.1)  & theme(axis.title.x = element_blank()) + NoLegend()
+plot4 <- SpatialFeaturePlot(seuratObjS01_ss_outlyer, features = "nFeature_Spatial") + theme(legend.position = "right")
+wrap_plots(plot3, plot4)
+
+```
+
+
+# normalise data
+```{r normalise_new}
+
+old_S01_norm <- SCTransform(seuratObjS01old, assay = "Spatial", verbose = FALSE, return.only.var.genes= TRUE)
+new_S01_norm <- SCTransform(new_S01, assay = "Spatial", verbose = FALSE, return.only.var.genes= TRUE)
+
+```
+
+
+# Check if there is a batch effect between samples
+```{r batch_effect_check_between_samples_new}
+merged.all.samples.new <- merge(new_S01, y = c(seuratObjS01old))
+merged.all.samples.new <- SCTransform(merged.all.samples.new, assay = "Spatial", verbose = FALSE, return.only.var.genes = TRUE)
+merged.all.samples.new <- ScaleData(merged.all.samples.new)
+merged.all.samples.new <- FindVariableFeatures(merged.all.samples.new, selection.method = "vst", nfeatures = 2000)
+merged.all.samples.new <- RunPCA(merged.all.samples.new, npcs = 30, verbose = FALSE)
+merged.all.samples.new <- FindNeighbors(merged.all.samples.new, dims = 1:30)
+merged.all.samples.new <- RunUMAP(merged.all.samples.new, reduction = "pca", dims = 1:30)
+
+DimPlot(merged.all.samples.new, reduction = "umap", group.by = "tissue", pt.size = 2)
+```
+
+
+
+# Integration and Dimentionality Reduction 
+```{r integration_and_dimentionality_reduction, warning=FALSE}
+
+#DefaultAssay(healthy_norm) <- "SCT"
+DefaultAssay(old_S01_norm) <- "SCT"
+DefaultAssay(new_S01_norm) <- "SCT"
+#healthy_norm <- FindVariableFeatures(healthy_norm, selection.method = "vst", nfeatures = 3000)
+old_S01_norm <- FindVariableFeatures(old_S01_norm, selection.method = "vst", nfeatures = 3000)
+new_S01_norm <- FindVariableFeatures(new_S01_norm, selection.method = "vst", nfeatures = 3000)
+#all.list <- c(healthy_norm,tumour_norm,new_S01_norm)
+tumour.list <- c(old_S01_norm,new_S01_norm)
+#features <- SelectIntegrationFeatures(object.list = all.list)
+features.tumour <- SelectIntegrationFeatures(object.list = tumour.list)
+
+####### TWO LINES WERE CHANGED ####### ANDREW -> 16/5/2022
+#all.list <- PrepSCTIntegration(object.list = all.list,anchor.features = features)
+#sep.anch <- FindIntegrationAnchors(object.list = all.list, anchor.features = features, normalization.method = "SCT")
+
+tumour.list <- PrepSCTIntegration(object.list = tumour.list,anchor.features = features.tumour)
+tumour.anch <- FindIntegrationAnchors(object.list = tumour.list, anchor.features = features.tumour, normalization.method = "SCT")
+####### ###################### #######
+
+#sep.data <- IntegrateData(anchorset = sep.anch, normalization.method = "SCT")
+tumour.data <- IntegrateData(anchorset = tumour.anch, normalization.method = "SCT")
+all.integrated <- tumour.data
+DefaultAssay(all.integrated) <- "integrated"
+all.integrated <- ScaleData(all.integrated)
+all.integrated <- RunPCA(all.integrated,   verbose = FALSE, npcs = 100)
+all.integrated <- FindNeighbors(all.integrated, dims = 1:100)
+all.integrated <- RunUMAP(all.integrated, reduction = "pca", dims = 1:100)
+
+
+# calculate variance explained by each PC
+total_variance <- all.integrated@reductions$pca@misc$total.variance
+eigValues <- (all.integrated[["pca"]]@stdev)^2
+varExplained <- eigValues / total_variance
+varExplained.cum <- cumsum(varExplained)
+### how many PCs before 20 % of the variance is explained?
+var.20pc <- sum(varExplained.cum <= 0.2)
+### how much variance do 50 PCs explain?
+varpc.50PCA <- 100*(varExplained.cum[50])
+print(paste0("The first 50 PCs explain ", round(varpc.50PCA), "% of the variance. 20% of the variance is explained by the first ", var.20pc, " PCs"))
+  
+# define some graph functions which will be run with `to.pdf` later
+## scree plot
+varExplained %>% enframe(name = "PC", value = "varExplained" ) %>%
+    ggplot(aes(x = PC, y = varExplained)) + 
+    theme_bw() +
+    geom_bar(stat = "identity") +
+    theme_classic() +
+    ggtitle("scree plot") +
+    ylab("explained variance")
+
+## cumulative variance
+ggplot(as.data.frame(varExplained.cum), aes(y = varExplained.cum, x = seq(1, length(varExplained.cum)))) +
+geom_point(size = 1) +
+theme_bw() +
+ggtitle("cumulative variance explained by increasing PCs") +
+xlab("PCs") +
+ylab("cumulative explained variance") +
+geom_hline(yintercept = c(0.2), linetype = "dashed", color = "blue") +
+geom_vline(xintercept = c(20), linetype = "dashed", color = "blue")
+
+# Make an elbow plot with elbow point annotated (adapted from Seurat's ElbowPlot() but to show all tested PCs)
+ElbowPlot(all.integrated, ndims = 50, reduction = "pca") +
+theme_bw() +
+ggtitle("elbow plot of standard deviations of principal components")
+
+DimPlot(all.integrated, reduction = "umap", group.by = "S01")
+
+```
+
+# pre-Clustering
+```{r integrated_and_normalised_data_qc}
+#a.int <- ScaleData(sep.data)
+
+a.int <- RunPCA(tumour.data,verbose = FALSE)
+a.int <- FindNeighbors(a.int, dims = 1:30)
+a.int <- RunUMAP(a.int, reduction = "pca", dims = 1:30)
+a.int <- RunTSNE(a.int, reduction = "pca", dims = 1:30)
+DimPlot(a.int, reduction = "umap", group.by = "S01")
+DimPlot(a.int, reduction = "umap", group.by = "tissue")
+DimPlot(a.int, reduction = "tsne", group.by = "S01")
+
+VlnPlot(a.int, group.by = "tissue", features = "nCount_Spatial",pt.size = 0.1) + NoLegend()
+
+VlnPlot(a.int, group.by = "tissue", features = "nFeature_Spatial",pt.size = 0.1)+ NoLegend()
+
+FeatureScatter(a.int, "nCount_Spatial","nFeature_Spatial", group.by = "tissue", pt.size = 0.5)
+
+```
+
+
+# Clustering
+```{r clustering_new, warning=FALSE}
+library(clustree)
+df.2 <- NULL
+df.2 <- FindClusters(a.int, resolution = 0)
+df.2 <- FindClusters(df.2, resolution = 0.1)
+df.2 <- FindClusters(df.2, resolution = 0.2)
+df.2 <- FindClusters(df.2, resolution = 0.3)
+df.2 <- FindClusters(df.2, resolution = 0.4)
+df.2 <- FindClusters(df.2, resolution = 0.6)
+df.2 <- FindClusters(df.2, resolution = 0.8)
+df.2 <- FindClusters(df.2, resolution = 1)
+df.2 <- FindClusters(df.2, resolution = 1.2)
+df.2 <- FindClusters(df.2, resolution = 1.4)
+df.2 <- FindClusters(df.2, resolution = 1.6)
+
+clust <- clustree(df.2, prefix = "integrated_snn_res.", node_colour = "sc3_stability")
+clust
+stability <- clust$data[,c("integrated_snn_res.", "sc3_stability")]
+write.table(stability, file = paste0(outputdir.new, "_clustree_stability.txt"), sep = "\t", quote = FALSE, row.names = FALSE, col.names = TRUE)
+stability.ave <- aggregate(as.numeric(stability$sc3_stability), list(stability$integrated_snn_res.), mean)
+rownames(stability.ave) <- stability.ave$Group.1
+stability.ave$Group.1 <- NULL
+bestres <- as.numeric(rownames(stability.ave)[which.max(stability.ave$x)])
+bestres #1.4
+integrated.cluster <- FindClusters(a.int, resolution = 0.6)
+integrated.cluster <- RunUMAP(integrated.cluster, reduction = "pca", dims = 1:30)
+
+SpatialDimPlot(integrated.cluster, combine = FALSE, label = TRUE)
+DimPlot(integrated.cluster)
+```
+
+# New S01 clustering only
+```{r only_new_obj}
+new_only <- RunPCA(new_S01_norm,verbose = FALSE)
+new_only <- FindNeighbors(new_only, dims = 1:30)
+new_only <- RunUMAP(new_only, reduction = "pca", dims = 1:30)
+new_only <- RunTSNE(new_only, reduction = "pca", dims = 1:30)
+DimPlot(new_only, reduction = "umap", group.by = "S01")
+DimPlot(new_only, reduction = "umap", group.by = "tissue")
+DimPlot(new_only, reduction = "tsne", group.by = "S01")
+new_only.int <- FindClusters(new_only, resolution = 1)
+new_only.int <- RunUMAP(new_only.int, reduction = "pca", dims = 1:30)
+
+SpatialDimPlot(new_only.int, combine = FALSE, label = TRUE)
+DimPlot(new_only.int)
+```
+
+# Add cluster Label to original object for DE
+NOTE: clusters have all had +1 added to them so now cluster 0 is cluster 1 and cluster 1 is cluster 2 etc. (not sure why this has happened but its something to do with the "paste0()" function -> i have checked tho and all the clustering is correct so instead of 0-10 its now 1-11)
+
+```{r add_cluster_to_raw_obj}
+
+add_back <- function (sr_obj,integrated_obj) {
+  
+  clusters_lables <- as.data.frame(integrated_obj[[c("Barcode","sample", "seurat_clusters")]])
+
+  i <- 1
+  len <- dim(sr_obj[[]])[1]
+  cluster_coords <- c()
+
+  while (i <= len) {
+    spot <- sr_obj[[]][i,]
+    if (spot[4] %in% clusters_lables$Barcode) {
+      label <- clusters_lables[paste0(spot[4]),][3]
+    } else {
+      label <- "unassigned"
+    }
+    cluster_coords <- c(cluster_coords, paste0(label)) 
+   i <- i+1
+  }
+  
+  cluster_coords_edit <- c()
+  for (i in cluster_coords){
+    cluster_coords_edit <- c(cluster_coords_edit, (as.numeric(i)-1))
+  }
+  
+  
+  sr_obj <- AddMetaData(sr_obj,cluster_coords_edit,col.name = "new_cluster")
+  return(sr_obj)
+}
+
+
+Idents(integrated.cluster) <-"S01"
+old_int.clust <- subset(integrated.cluster, idents = "old")
+new_int.clust <- subset(integrated.cluster, idents = "new")
+Idents(integrated.cluster) <- "seurat_clusters"
+
+seuratObjS01_ss <- add_back(seuratObjS01_ss, old_int.clust)
+seuratObjS01old <- add_back(seuratObjS01old, old_int.clust)
+seuratObjS01new_ss <- add_back(seuratObjS01new_ss, new_int.clust)
+
+SpatialDimPlot(seuratObjS01old, group.by = 'new_cluster')
+SpatialDimPlot(seuratObjS01new_ss, group.by = 'new_cluster')
+```
+
+
+# Add only new clusters
+```{r add_cluster_new}
+
+add_back <- function (sr_obj,integrated_obj) {
+  clusters_lables <- as.data.frame(integrated_obj[[c("Barcode","sample", "seurat_clusters")]])
+
+  i <- 1
+  len <- dim(sr_obj[[]])[1]
+  cluster_coords <- c()
+
+  while (i <= len) {
+    spot <- sr_obj[[]][i,]
+    if (spot[4] %in% clusters_lables$Barcode) {
+      label <- clusters_lables[paste0(spot[4]),][3]
+    } else {
+      label <- "unassigned"
+    }
+    cluster_coords <- c(cluster_coords, paste0(label)) 
+   i <- i+1
+  }
+  
+  cluster_coords_edit <- c()
+  for (i in cluster_coords){
+    cluster_coords_edit <- c(cluster_coords_edit, (as.numeric(i)-1))
+  }
+  
+  
+  sr_obj <- AddMetaData(sr_obj,cluster_coords_edit,col.name = "new_cluster_only")
+  return(sr_obj)
+}
+
+seuratObjS01new_ss <- add_back(seuratObjS01new_ss, new_only.int)
+
+SpatialDimPlot(seuratObjS01new_ss, group.by = 'new_cluster_only')
+DimPlot(new_only.int, group.by = "seurat_clusters",reduction = "umap")
+```
+
+
+# Cell Cycle 
+
+This code produces plots for each sample (using integrated dataset) to display cell cycles stage of each spot -> found that alot of tumour regions in S and G2M phase
+
+```{r cell_cycle_integrated_new}
+
+func_predictCellCycle <- function(seuratObj, myspecies="human", outdir,sampleID){
+  # USAGE: seuratObj <- func_predictCellCycle(seuratObj, "mouse")
+  # OUTPUT: a Seurat object with S/G2M-phase scores and cell stage (G1, S, G2M) calls
+
+  # specify the gene set used for Cell Cycle Scoring (human or mouse)
+  if (identical(myspecies, "mouse")) {
+    load("/Users/uqlgrice/Documents/IMB/Research/LabBooks/20200106_BuildPipe/data/mouse.cc.genes.Rdata")
+    geneset <- mouse.cc.genes
+  } else if (identical(myspecies, "human")) {
+    geneset <- cc.genes.updated.2019
+  } else {
+    stop("The 'species' argument must be mouse or human")
+  }
+
+  # make a Seurat object, normalise, run prediction
+  # note: we use Seurat's default normalisation tool for the cell phase assessment (quick and dirty). Later we will use Scran for the normal normalisation
+
+  seuratObj <- CellCycleScoring(seuratObj,
+                                s.features = geneset$s.genes,
+                                g2m.features = geneset$g2m.genes,
+                                set.ident = TRUE)
+
+  # define some graph functions which will be run with `to.pdf` later
+  fig.cellcycle.bar <- function() {
+    pdf(paste0(outdir,"/",sampleID, "_CellCycle_bar.pdf"))
+    myscale <- round(max(table(seuratObj$Phase)), -3) #scale
+    mybar <- barplot(table(seuratObj$Phase),
+                     ylim = (c(0, myscale)),
+                     main = paste0("Cell Phases in ", sampleID),
+                     xlab = "cell phase",
+                     ylab = "# cells",
+                     col = "white")
+    text(mybar,
+         table(seuratObj$Phase)+100,
+         paste("n: ", table(seuratObj$Phase), sep=""), cex = 1)
+    dev.off()
+  }
+
+  fig.cellcycle.pie <- function() {
+    pdf(paste0(outdir, "/",sampleID, "_CellCycle_pie.pdf"))
+    pie(table(seuratObj$Phase),
+        labels = table(seuratObj$Phase),
+        col = c("bisque", "cornflowerblue", "cadetblue2"),
+        main = paste0("Cell phases in ", sampleID))
+    legend("topright", c("G1", "G2M", "S"), cex = 0.8, fill = c("bisque", "cornflowerblue", "cadetblue2"))
+    dev.off()
+  }
+
+  # spatial plots
+  fig.cellcycle.spatial <- function() {
+    SpatialDimPlot(seuratObj, group.by = "Phase", pt.size.factor = 1.4) +
+      theme(legend.position = "right")
+    ggsave(paste0(outdir, "/",sampleID, "_CellCycle_spatial.pdf"))
+
+  }
+
+  # Run the figure functions and save graphs as PDFs
+  #ggsave(paste0(outdir,"/",sampleID, "_CellCycle_bar.pdf"))
+  #ggsave(paste0(outdir, "/",sampleID, "_CellCycle_pie.pdf"))
+  #ggsave(paste0(outdir, "/",sampleID, "_CellCycle_spatial.pdf"))
+  fig.cellcycle.bar()
+  fig.cellcycle.pie()
+  fig.cellcycle.spatial()
+
+  # return the updated SCE
+  return(seuratObj)
+}
+
+integrated.cluster <- func_predictCellCycle(integrated.cluster, "human", outputdir.new, "integrated")
+
+
+#add cell_cycle values back to original object to compare with clustering and DE
+
+add_back_cc <- function(sr_obj, integrated_obj){
+  
+  cell_cycle_labels <- as.data.frame(integrated_obj[[c("Barcode","sample", "Phase")]])
+
+  i <- 1
+  len <- dim(sr_obj[[]])[1]
+  cell_cycle_coords <- c()
+
+  while (i <= len) {
+    spot <- sr_obj[[]][i,]
+    if (spot[4] %in% cell_cycle_labels$Barcode) {
+      label <- cell_cycle_labels[paste0(spot[4]),][3]
+    } else {
+      label <- "unassigned"
+    }
+    cell_cycle_coords <- c(cell_cycle_coords, paste0(label)) 
+    i <- i+1
+  }
+  sr_obj <- AddMetaData(sr_obj,cell_cycle_coords,col.name = "Cell_Phase_new")
+}
+
+Idents(integrated.cluster) <- "S01"
+
+old_int.clust <- subset(integrated.cluster, idents = "old")
+new_int.clust <- subset(integrated.cluster, idents = "new")
+Idents(integrated.cluster) <- "seurat_clusters"
+
+
+seuratObjS01_ss <- add_back_cc(seuratObjS01_ss, old_int.clust)
+seuratObjS01old <- add_back_cc(seuratObjS01old, old_int.clust)
+seuratObjS01new_ss <- add_back_cc(seuratObjS01new_ss, new_int.clust)
+
+SpatialDimPlot(seuratObjS01old, group.by = 'Cell_Phase_new', cols = c("#457B9D", "#ED553B", "#F6D55C", "grey"), label.size = 3, alpha = c(1, 0.4))
+
+SpatialDimPlot(seuratObjS01new_ss, group.by = 'Cell_Phase_new', cols = c("#457B9D", "#ED553B", "#F6D55C", "grey"), label.size = 3, alpha = c(1, 0.4))
+```
+
+# UMAP New and Old Cell Phase
+```{r cell_phase_new_UMAP}
+DimPlot(integrated.cluster, reduction = "umap", group.by = "Phase", cols = c("#457B9D", "#ED553B", "#F6D55C"))
+DimPlot(integrated.cluster, reduction = "tsne", group.by = "Phase", cols = c("#457B9D", "#ED553B", "#F6D55C"))
+```
+
+# Images for Publication
+
+```{r figure_4}
+bew_pal_new <- c("#A6CEE3", "#6A3D9A","#FF7F00","#1F78B4","#33A02C","#E31A1C", "#FDBF6F","#B2DF8A","#CAB2D6","#B15928")
+                 
+phase_palate <-c("#457B9D", "#ED553B", "#F6D55C")
+
+coord <- GetTissueCoordinates(object = seuratObjS01old)
+# calculate the aspect ratio of rows to columns
+myratio_old <- (max(coord$imagerow) - min(coord$imagerow)) / (max(coord$imagecol) - min(coord$imagecol))
+
+coord <- GetTissueCoordinates(object = seuratObjS01new_ss)
+# calculate the aspect ratio of rows to columns
+myratio_new <- (max(coord$imagerow) - min(coord$imagerow)) / (max(coord$imagecol) - min(coord$imagecol))
+
+
+#### NEW & OLD
+DimPlot(integrated.cluster, group.by = 'seurat_clusters', reduction = 'umap',cols = bew_pal_new, pt.size = 2) + theme(axis.title = element_blank(), axis.ticks = element_blank(), axis.text = element_blank(), axis.line = element_blank())
+
+DimPlot(integrated.cluster, group.by = 'S01', reduction = 'umap',cols = c("#4CB2F9","#FF4949"), pt.size = 2) + theme(axis.title = element_blank(), axis.ticks = element_blank(), axis.text = element_blank(), axis.line = element_blank())
+
+SpatialDimPlot(seuratObjS01old, group.by = 'new_cluster',cols = bew_pal_new, pt.size.factor = 1.2, image.alpha = 0)+theme(aspect.ratio = myratio_old)
+
+SpatialDimPlot(seuratObjS01new_ss, group.by = 'new_cluster',cols = bew_pal_new, pt.size.factor = 1.4, image.alpha = 0)+theme(aspect.ratio = myratio_new)
+
+
+SpatialDimPlot(seuratObjS01old, group.by = 'Cell_Phase_new', cols = c("#457B9D", "#ED553B", "#F6D55C"), image.alpha = 0, pt.size.factor = 1.2)+theme(aspect.ratio = myratio_old)
+
+SpatialDimPlot(seuratObjS01new_ss, group.by = 'Cell_Phase_new',cols = c("#457B9D", "#ED553B", "#F6D55C"), pt.size.factor = 1.4, image.alpha = 0)+theme(aspect.ratio = myratio_new)
+
+
+DimPlot(integrated.cluster, reduction = "umap", group.by = "Phase", cols = c("#457B9D", "#ED553B", "#F6D55C"), pt.size = 2)+ theme(axis.title = element_blank(), axis.ticks = element_blank(), axis.text = element_blank(), axis.line = element_blank())
+
+
+#### NEW Only
+DimPlot(new_only.int, group.by = 'seurat_clusters', reduction = 'umap',cols = c("#A6CEE3","#B2DF8A","#6A3D9A","#CAB2D6","#33A02C","#FDBF6F"), pt.size = 2) + theme(axis.title = element_blank(), axis.ticks = element_blank(), axis.text = element_blank(), axis.line = element_blank())
+
+SpatialDimPlot(seuratObjS01new_ss, group.by = 'new_cluster_only',cols = c("#A6CEE3","#B2DF8A","#6A3D9A","#CAB2D6","#33A02C","#FDBF6F"), pt.size.factor = 1.2, image.alpha = 0)+theme(aspect.ratio = myratio_new)
+
+```
+
+```{r save_new_seuratObj}
+
+#saveRDS(seuratObjS01old, paste0(outputdir.new, file = "S01_old.rds"))
+#saveRDS(seuratObjS01new_ss, paste0(outputdir.new, file = "S01_new.rds"))
+
+```
+
+# DE analysis of New and Old clusters
+```{r New_DE_analysis}
+
+filter_data_pots(seuratObjS01new_ss, outputdir.new, "S01_new")
+seuratObjS01new_ss<-filter_data(seuratObjS01new_ss,outputdir.new,"S01_new")
+check_outlyers(seuratObjS01new_ss)
+
+Idents(seuratObjS01new_ss) <- "new_cluster"
+
+#normalise data using 'LogNormalisation' -> SCTransform removes variance between genes which will effect DE analysis
+S01_new_norm <- SCTransform(seuratObjS01new_ss, assay = "Spatial", verbose = FALSE)
+
+filter_data_pots(seuratObjS01old, outputdir.new, "S01_old")
+seuratObjS01old<-filter_data(seuratObjS01old,outputdir.new,"S01_old")
+check_outlyers(seuratObjS01old)
+Idents(seuratObjS01old) <- "new_cluster"
+S01_old_norm <- SCTransform(seuratObjS01old, assay = "Spatial", verbose = FALSE)
+
+
+out.new.de <- paste0(outputdir.new,"/DE/")
+dir.create(out.new.de)
+
+merged.DE.data <- merge(S01_old_norm, y = c(S01_new_norm), add.cell.ids = c("Old","New"))
+
+pos_markers_new_old <- FindAllMarkers(merged.DE.data, assay = "SCT", slot = "data", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+# filter to only significant hits
+pos_markers_new_old <- pos_markers_new_old %>% filter(p_val_adj <= 0.05)
+top10_norm <- pos_markers_new_old %>% group_by(cluster) %>% arrange(-avg_log2FC) %>% dplyr::slice(1:10)
+
+write.table(pos_markers_new_old, file = paste0(out.new.de, "pos_norm_allmarkers.txt"), sep = "\t", quote = FALSE, col.names = NA)
+write.table(pos_markers_new_old, file = paste0(out.new.de, "pos_norm_top10markers.txt"), sep = "\t", quote = FALSE, col.names = NA)
+
+#### Look at both UP- and DOWN-regualted Genes ####
+markers_all_new_old <- FindAllMarkers(merged.DE.data, assay = "SCT", slot = "data", min.pct = 0.25, logfc.threshold = 0.25)
+# filter to only significant hits
+markers_all_new_old <- markers_all_new_old %>% filter(p_val_adj <= 0.05)
+top10_all <- markers_all_new_old %>% group_by(cluster) %>% arrange(-avg_log2FC) %>% dplyr::slice(1:10)
+write.table(markers_all_new_old, file = paste0(out.new.de, "new_old_allmarkers.txt"), sep = "\t", quote = FALSE, col.names = NA) 
+write.table(top10_all, file = paste0(out.new.de, "new_old_top10markers.txt"), sep = "\t", quote = FALSE, col.names = NA)
+
+#Displays distribution of data across each plots
+VlnPlot(merged.DE.data, group.by = "new_cluster", slot = "data", features = "nCount_Spatial")
+VlnPlot(merged.DE.data, group.by = "new_cluster", slot = "data", features = "nFeature_Spatial")
+SpatialDimPlot(merged.DE.data, group.by = 'new_cluster')
+```
+
+```{r DE_genes_paired_tumour_clusters_new}
+spots_list <- c()
+for (i in merged.DE.data$new_cluster){
+  if ( i == "4" | i == "7") {
+    c <- "Tumour_group"
+  } else {
+    c <-  i
+  }
+  spots_list <- c(spots_list, c)
+}
+rownames(spots_list) <- rownames(merged.DE.data$new_cluster)
+
+merged.DE.data <- AddMetaData(merged.DE.data, spots_list, col.name = "combined_tumour_groups")
+
+Idents(merged.DE.data) <- "combined_tumour_groups"
+pos_markers_merged <- FindAllMarkers(merged.DE.data, assay = "SCT", slot = "data", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+# filter to only significant hits
+pos_markers_merged <- pos_markers_merged %>% filter(p_val_adj <= 0.05)
+
+write.table(pos_markers_merged, file = paste0(out.new.de, "pos_allmarkers_merged_tumour_combined.txt"), sep = "\t", quote = FALSE, col.names = NA)
+
+```
+
+
+# Spatial Plot of only Tumour clusters
+```{r only_tumour_newOld}
+spots_list <- c()
+for (i in merged.DE.data$new_cluster){
+  if ( i == "4" | i == "7") {
+    c <- i
+  } else {
+    c <-  "NA"
+  }
+  spots_list <- c(spots_list, c)
+}
+rownames(spots_list) <- rownames(merged.DE.data$new_cluster)
+
+merged.DE.data <- AddMetaData(merged.DE.data, spots_list, col.name = "tumour_grey_newold")
+
+SpatialDimPlot(merged.DE.data, group.by = "tumour_grey_newold", cols = c("#33A02C", "#B2DF8A","grey"), combine = FALSE)
+
+spots_list <- c()
+for (i in S01_old_norm$new_cluster){
+  if ( i == "4" | i == "7") {
+    c <- i
+  } else {
+    c <-  "NA"
+  }
+  spots_list <- c(spots_list, c)
+}
+rownames(spots_list) <- rownames(S01_old_norm$new_cluster)
+
+S01_old_norm <- AddMetaData(S01_old_norm, spots_list, col.name = "tumour_grey_newold")
+SpatialDimPlot(S01_old_norm, group.by = "tumour_grey_newold", cols = c("#33A02C", "#B2DF8A","grey"), pt.size.factor = 1.2) + theme(aspect.ratio = myratio_old)
+```
+```{r compare_tumour_DEGs}
+
+spots_list <- c()
+idx <- 1
+for (i in merged.DE.data$new_cluster){
+  if ( i == "4" | i == "7") {
+    c <- paste0(i,"_", merged.DE.data$S01[idx])
+  } else {
+    c <-  "NA"
+  }
+  spots_list <- c(spots_list, c)
+  idx <- idx+1
+}
+rownames(spots_list) <- rownames(merged.DE.data$new_cluster)
+
+merged.DE.data <- AddMetaData(merged.DE.data, spots_list, col.name = "Between_Tumour_Comparision")
+
+Idents(merged.DE.data) <- "Between_Tumour_Comparision"
+Tumour_clust_only <- subset(merged.DE.data, idents = c("NA"), invert = TRUE)
+
+Idents(Tumour_clust_only) <- "Between_Tumour_Comparision"
+BT_C4 <- FindMarkers(Tumour_clust_only, assay = "SCT", slot = "data", only.pos = TRUE, ident.1 = "4_new", ident.2 = "4_old"#,min.pct = 0.25, logfc.threshold = 0.25
+                     )
+
+BT_C7 <- FindMarkers(Tumour_clust_only, assay = "SCT", slot = "data", only.pos = TRUE, ident.1 = "7_new", ident.2 = "7_old"#,min.pct = 0.25, logfc.threshold = 0.25
+                     )
+
+
+# filter to only significant hits
+#BT_C4 <- BT_C4 %>% filter(p_val_adj <= 0.05)
+#BT_C7 <- BT_C7 %>% filter(p_val_adj <= 0.05)
+write.table(BT_C4, file = paste0(out.new.de, "BT_C4.txt"), sep = "\t", quote = FALSE, col.names = NA)
+write.table(BT_C7, file = paste0(out.new.de, "BT_C7.txt"), sep = "\t", quote = FALSE, col.names = NA)
+
+
+
+merged.pre.st<- merge(seuratObjS01old, y = c(seuratObjS01new_ss), add.cell.ids = c("Old","New"))
+
+Idents(merged.pre.st) <- "new_cluster"
+merged.pre.st <- SCTransform(merged.pre.st, assay = "Spatial", verbose = FALSE)
+
+merged.pre.st.markers <- FindAllMarkers(merged.pre.st, assay = "SCT", slot = "data", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+# filter to only significant hits
+merged.pre.st.markers <- merged.pre.st.markers %>% filter(p_val_adj <= 0.05)
+write.table(merged.pre.st.markers, file = paste0(out.new.de, "merged.pre.st.markers.txt"), sep = "\t", quote = FALSE, col.names = NA)
+
+
+spots_list <- c()
+idx <- 1
+for (i in merged.pre.st$new_cluster){
+  if ( i == "4" | i == "7") {
+    c <- paste0(i,"_", merged.pre.st$S01[idx])
+  } else {
+    c <-  "NA"
+  }
+  spots_list <- c(spots_list, c)
+  idx <- idx+1
+}
+rownames(spots_list) <- rownames(merged.pre.st$new_cluster)
+
+merged.pre.st.markers <- AddMetaData(merged.pre.st, spots_list, col.name = "Between_Tumour_Comparision")
+
+Idents(merged.pre.st.markers) <- "Between_Tumour_Comparision"
+merged.pre.clust <- subset(merged.pre.st.markers, idents = c("NA"), invert = TRUE)
+
+Idents(merged.pre.clust) <- "Between_Tumour_Comparision"
+BT_C4 <- FindMarkers(merged.pre.clust, assay = "SCT", slot = "data", ident.1 = "4_new", ident.2 = "4_old"#,min.pct = 0.25, logfc.threshold = 0.25
+                     )
+
+BT_C7 <- FindMarkers(merged.pre.clust, assay = "SCT", slot = "data", ident.1 = "7_new", ident.2 = "7_old"#,min.pct = 0.25, logfc.threshold = 0.25
+                     )
+
+write.table(BT_C4, file = paste0(out.new.de, "BT_C4.txt"), sep = "\t", quote = FALSE, col.names = NA)
+write.table(BT_C7, file = paste0(out.new.de, "BT_C7.txt"), sep = "\t", quote = FALSE, col.names = NA)
+
+
+
+#volcano plot between samples 
+
+#BT_C4
+
+top.labels <- BT_C4 %>% filter(p_val <= 0.05) %>% filter(avg_log2FC > 1) %>% arrange(-avg_log2FC) %>% dplyr::slice(1:10)
+bottom.labels <-BT_C4 %>% filter(p_val <= 0.05) %>% filter(avg_log2FC < -1) %>% arrange(avg_log2FC) %>% dplyr::slice(1:10)
+labs <- c(rownames(top.labels), rownames(bottom.labels))
+
+keyvals.colour <- ifelse(
+    BT_C4$avg_log2FC < -1 &  BT_C4$p_val < 0.001, 'royalblue',
+      ifelse(BT_C4$avg_log2FC > 1 &  BT_C4$p_val < 0.001, 'red',
+        'black'))
+  keyvals.colour[is.na(keyvals.colour)] <- 'black'
+  names(keyvals.colour)[keyvals.colour == 'red'] <- 'Up Regulated'
+  #names(keyvals.colour)[keyvals.colour == 'black'] <- 'mid'
+  names(keyvals.colour)[keyvals.colour == 'royalblue'] <- 'Down Regulated'
+  
+  
+  
+  plot1<- EnhancedVolcano(BT_C4,
+    lab = rownames(BT_C4),
+    selectLab = c(labs),
+    #selectLab = markers_all_grouped[x,]$gene[which(names(keyvals.colour) %in% c('Up Regulated', 'Down Regulated'))],
+    colCustom = keyvals.colour,
+    x = 'avg_log2FC',
+    y = 'p_val',
+    title = paste0("Tumour Cluster 4"),
+    pointSize = 4.0,
+    labSize = 6.0,
+    labCol = 'black',
+    labFace = 'bold',
+    boxedLabels = TRUE,
+    colAlpha = 4/5,
+    legendPosition = 'right',
+    legendLabSize = 14,
+    legendIconSize = 4.0,
+    drawConnectors = TRUE,
+    widthConnectors = 0.5,
+    colConnectors = 'black',
+    xlim = c(-4,4),
+    gridlines.major = FALSE,
+    gridlines.minor = FALSE,
+    pCutoff = 0.001
+    )
+  
+plot1
+
+
+#BT_C7
+
+top.labels <- BT_C7 %>% filter(p_val <= 0.05) %>% filter(avg_log2FC > 1) %>% arrange(-avg_log2FC) %>% dplyr::slice(1:10)
+bottom.labels <-BT_C7 %>% filter(p_val <= 0.05) %>% filter(avg_log2FC < -1) %>% arrange(avg_log2FC) %>% dplyr::slice(1:10)
+labs <- c(rownames(top.labels), rownames(bottom.labels))
+
+keyvals.colour <- ifelse(
+    BT_C7$avg_log2FC < -1 &  BT_C7$p_val < 0.001, 'royalblue',
+      ifelse(BT_C7$avg_log2FC > 1 &  BT_C7$p_val < 0.001, 'red',
+        'black'))
+  keyvals.colour[is.na(keyvals.colour)] <- 'black'
+  names(keyvals.colour)[keyvals.colour == 'red'] <- 'Up Regulated'
+  #names(keyvals.colour)[keyvals.colour == 'black'] <- 'mid'
+  names(keyvals.colour)[keyvals.colour == 'royalblue'] <- 'Down Regulated'
+  
+  
+  
+  plot2<- EnhancedVolcano(BT_C7,
+    lab = rownames(BT_C7),
+    selectLab = c(labs),
+    #selectLab = markers_all_grouped[x,]$gene[which(names(keyvals.colour) %in% c('Up Regulated', 'Down Regulated'))],
+    colCustom = keyvals.colour,
+    x = 'avg_log2FC',
+    y = 'p_val',
+    title = paste0("Tumour Cluster 7"),
+    pointSize = 4.0,
+    labSize = 6.0,
+    labCol = 'black',
+    labFace = 'bold',
+    boxedLabels = TRUE,
+    colAlpha = 4/5,
+    legendPosition = 'right',
+    legendLabSize = 14,
+    legendIconSize = 4.0,
+    drawConnectors = TRUE,
+    widthConnectors = 0.5,
+    colConnectors = 'black',
+    xlim = c(-4,4),
+    gridlines.major = FALSE,
+    gridlines.minor = FALSE,
+    pCutoff = 0.001
+    )
+  
+plot2
+
+```
+
+
+# New Heatmap
+```{r heatmap_new}
+#flip coords
+mylevels <- rev(mixedsort(unique(merged.DE.data$new_cluster)))
+merged.DE.data@meta.data$new_cluster <- factor(x = merged.DE.data@meta.data$new_cluster , levels = mylevels)
+Idents(merged.DE.data) <- "new_cluster"
+
+set.seed(12)
+cells_splt <- lapply(unique(merged.DE.data$new_cluster), function(i){
+  Idents(merged.DE.data) <- 'new_cluster'
+  spt <- subset(merged.DE.data, ident = i)
+  spt_barcodes <- sample(rownames(spt@meta.data), size = 23, replace = FALSE)
+})
+cells_hm <- unlist(cells_splt)
+
+top3 <- markers_all_new_old %>% group_by(cluster) %>% arrange(-avg_log2FC) %>% dplyr::slice(1:3)
+
+hm <- DoHeatmap(merged.DE.data, features = rev(top3$gene), cells = cells_hm, assay = "SCT", group.bar = TRUE, group.colors = bew_pal_new, angle = 0, hjust = 1, draw.lines = FALSE)+ scale_fill_gradient2(low = "#075AFF",mid = "#FFFFCC",high = "#FF0000", na.value = "white")
+
+# ggplot(hm$data, aes(x = Feature, y = Cell, fill = Expression)) +
+#     geom_tile() + scale_fill_gradient2(low = "#075AFF",
+#                        mid = "#FFFFCC",
+#                        high = "#FF0000")
+
+mt_df <- hm$data
+mt_df <- mt_df %>% na.omit()
+df.wide <- pivot_wider(mt_df, names_from = Feature, values_from = Expression)
+df.wide <- as.data.frame(df.wide)
+rownames(df.wide) <- df.wide$Cell
+df.wide <-  df.wide[,-1]
+df.wide <- mutate_all(df.wide, function(x) as.numeric(as.character(x)))
+df.wide <- df.wide %>% arrange(Identity)
+hms <- lapply(unique(df.wide$Identity), function(i) {
+  sub_mat <- subset.data.frame(df.wide, Identity == i)
+  hsub_mat <- sub_mat[,-1]
+  #smt <- as.matrix(sub_mat)
+  hsub_mat
+})
+
+final_df <- rbind(hms[[4]],hms[[7]],hms[[2]],hms[[8]],hms[[5]],hms[[1]],hms[[3]],hms[[6]],hms[[9]],hms[[10]])
+mt <- as.matrix(final_df)
+
+annot_row <-data.frame(cluster = rev( as.factor(rep(c("c0","c1","c2","c3","c4","c5","c6","c7","c8","c9"),each=23))))
+rownames(annot_row) <- rownames(mt)
+
+
+annot_col <- data.frame(GOTerms = factor(rep(c("Vascular Development",
+                                            "Keratinocyte Differentiation",
+                                            "Leukocyte Agregation",
+                                            "mRNA Processing",
+                                            "DNA Strand Elongation",
+                                            "EM Organisation",
+                                            "Epidermis Development",
+                                            "DNA Metabolic Process",
+                                            "B Cell Receptor Signalling Pathway", "Leukocyte Agregation"),c(3,3,2,2,3,3,3,3,3,3))))
+rownames(annot_col) <- colnames(mt)
+col_gaps <- c(3,6,8,10,13,16,19,22,25,28)
+
+gaps <- c(23,46,69,92,115,138,161,184,207,230)
+
+
+annot_colours <- list(cluster = c(c0 = "#A6CEE3", c1= "#6A3D9A", c2 = "#FF7F00", c3 = "#1F78B4", c4 ="#33A02C", c5 ="#E31A1C", c6 = "#FDBF6F", c7 = "#B2DF8A", c8 ="#CAB2D6", c9 = "#B15928"),
+                      GOTerms = c("Vascular Development" = "#40004B","Keratinocyte Differentiation" = "#762A83","Leukocyte Agregation" =  "#9970AB", "mRNA Processing" = "#C2A5CF", "DNA Strand Elongation" = "#E7D4E8",  "EM Organisation"="#F7F7F7",  "Epidermis Development"= "#D9F0D3", "DNA Metabolic Process" = "#A6DBA0", "B Cell Receptor Signalling Pathway" ="#5AAE61", "Leukocyte Agregation" = "#1B7837"))
+
+
+pheatmap(mt, cluster_cols = FALSE, cluster_rows = FALSE, annotation_row = annot_row, show_rownames = FALSE,gaps_row = gaps, annotation_colors = annot_colours, angle = "90", annotation_col = annot_col, gaps_col = col_gaps, annotation_legend = FALSE)
+
+mylevels <- rev(mixedsort(unique(merged.DE.data$new_cluster)))
+merged.DE.data@meta.data$new_cluster <- factor(x = merged.DE.data@meta.data$new_cluster , levels = mylevels)
+Idents(merged.DE.data) <- "new_cluster"
+
+df <- AverageExpression(merged.DE.data, assays = "SCT", features = top3$gene, group.by = "new_cluster", slot = "scale.data")
+mat <- as.matrix(df$SCT)
+colnames(mat) <- c("Vascular System",
+                   "Keratinocyte",
+                   "Epithelium1",
+                   "Epithelium2",
+                   "Cervical Carcinoma1",
+                   "Epithelium3",
+                   "Stratified Epithelium",
+                   "Cervical Carcinoma2",
+                   "Unknown",
+                   "Pharynx")
+                   
+df <- data.frame(from = rep(rownames(mat), times = ncol(mat)),
+    to = rep(colnames(mat), each = nrow(mat)),
+    value = as.vector(mat),
+    stringsAsFactors = FALSE)
+
+
+
+colours.circle <- c( `Vascular System` = "#A6CEE3",
+                   Keratinocyte = "#6A3D9A",
+                   Epithelium1 = "#FF7F00",
+                   Epithelium2 = "#1F78B4",
+                   `Cervical Carcinoma1` = "#33A02C",
+                   Epithelium3 ="#E31A1C",
+                   `Stratified Epithelium` = "#FDBF6F",
+                   `Cervical Carcinoma2`= "#B2DF8A",
+                   Unknown ="#CAB2D6",
+                   Pharynx = "#B15928",
+                   COL1A2 =  "#440154FF",
+                   COL3A1= "#470E61FF",
+                   SPARC="#481B6DFF",
+                   SPINK7="#482576FF",
+                   CRNN= "#46307EFF" ,
+                   RPTN="#443B84FF",
+                   CXCL8="#404688FF",
+                   ALDH1A3="#3C508BFF",
+                   S100P="#38598CFF",
+                   KRT4= "#33628DFF",
+                   KRT13="#2F6B8EFF",
+                   #HBA2="#2C738EFF",
+                   KRT8="#287C8EFF",
+                   NFIB="#25838EFF",
+                   TF="#228C8DFF",
+                   CXCL14="#1F948CFF",
+                   COL17A1="#1E9D89FF",
+                   IGFBP2="#20A486FF",
+                   DSG1="#26AD81FF",
+                   KRTDAP="#31B57BFF",
+                   AQP3="#3FBC73FF",
+                   TGFBI="#4FC46AFF",
+                   VEGFA="#61CB5FFF",
+                   EGLN3="#75D054FF" ,
+                   IGHG4="#8BD646FF",
+                   IGKC="#A2DA37FF",
+                   IGHG2="#B9DE28FF",
+                   G0S2="#D1E11CFF",
+                   CXCL8="#E8E419FF",
+                   SPP1="#FDE725FF")
+     
+col_mat <- rep(viridis::viridis(length(rownames(mat)),alpha = 0.5),10)
+
+mat1 <- matrix(rep(FALSE,length(mat)), nrow = dim(mat)[1], ncol = dim(mat)[2])
+
+i <- 1
+while (i <= length(rownames(mat))){
+  mat_row <- mat[i,]
+  max_value <- max(mat_row)
+  second_value <- 
+  row_index <- which(mat_row == max_value)
+  mat1[i,row_index] = TRUE
+  i <- i+1
+}
+
+col_mat[mat1 == FALSE] = "#00000000"
+
+chordDiagram(df, grid.col = colours.circle, col = col_mat)
+
+
+```           
+
+```{r chord_prop}
+top10_old <- read.table(file = paste0(outdir.DE, "pos_norm_top10markers.txt"))
+
+top3_genes <- top10_old %>% group_by(cluster) %>% arrange(-avg_log2FC) %>% dplyr::slice(1:3)
+df <- AverageExpression(merged.DE.data, assays = "SCT", features = top3_genes$gene, group.by = "new_cluster", slot = "scale.data")
+mat <- as.matrix(df$SCT)
+# colnames(mat) <- c("Vascular System",
+#                    "Keratinocyte",
+#                    "Epithelium1",
+#                    "Epithelium2",
+#                    "Cervical Carcinoma1",
+#                    "Epithelium3",
+#                    "Stratified Epithelium",
+#                    "Cervical Carcinoma2",
+#                    "Unknown",
+#                    "Pharynx")
+                   
+df <- data.frame(from = rep(rownames(mat), times = ncol(mat)),
+    to = rep(colnames(mat), each = nrow(mat)),
+    value = as.vector(mat),
+    stringsAsFactors = FALSE)
+
+colours.circle <- c( `0` = "#A6CEE3",
+                   `1` = "#6A3D9A",
+                   `2` = "#FF7F00",
+                   `3` = "#1F78B4",
+                   `4` = "#33A02C",
+                   `5` ="#E31A1C",
+                   `6` = "#FDBF6F",
+                   `7`= "#B2DF8A",
+                   `8` ="#CAB2D6",
+                   `9` = "#B15928",
+                   MMP2 =  "#B1592859",
+                   COL1A2= "#B1592859",
+                   DCN="#B1592859",
+                   RNASE7= "#6A3D9A59" ,
+                   LCE3E="#6A3D9A59",
+                   LCE3D="#6A3D9A59",
+                   `IGKV4-1`="#CAB2D659",
+                   IGHG4="#CAB2D659",
+                   IGKC= "#CAB2D659",
+                   MB="#FF7F0059",
+                   #MB="#2C738EFF",
+                   IVL="#FDBF6F59",
+                   KRTDAP="#FDBF6F59",
+                   DSG1="#FDBF6F59",
+                   TGFBI="#B2DF8AFF",
+                   NDRG1="#B2DF8AFF",
+                   EGLN3="#B2DF8AFF",
+                   TF="#33A02CFF",
+                   GAS1="#33A02CFF",
+                   KRT8="#33A02CFF",
+                   CXCL14="#E31A1C59",
+                   IGFBP2="#E31A1C59",
+                   COL17A1="#E31A1C59" ,
+                   CNFN="#FB9A9959",
+                   CRNN="#FB9A9959",
+                   MUC21="#FB9A9959",
+                   IGFBP7="#A6CEE359",
+                   LYZ="#A6CEE359",
+                   CCL18="#A6CEE359")
+
+order_circ <- c( "MMP2","COL1A2","DCN","RNASE7","LCE3E", "LCE3D","IGKV4-1","IGHG4",                 "IGKC", "MB","IVL",    "KRTDAP",  "DSG1",   "CXCL14",    "IGFBP2",  "COL17A1",     "CNFN",   "CRNN", "MUC21", "IGFBP7","LYZ","CCL18","TGFBI","NDRG1","EGLN3","TF","GAS1","KRT8","0","1","2","3","4","5","6","7","8","9")
+  
+
+mat.1 <- pmax(mat,0)
+mb <- matrix("black", nrow = 6, ncol = ncol(mat.1))
+rownames(mb) <- rownames(mat.1)[10:15]
+colnames(mb) <- colnames(mat.1)
+
+#arrow_df <- data.frame(c("TF","GAS1","KRT8","TGFB1","NDRG1","EGLN3"),c("4","4","4","7","7","7"),c("black","black","black","black","black","black"))
+chordDiagram(mat.1, grid.col = colours.circle, order = order_circ, transparency = 0, annotationTrack = c("name","grid"), scale = TRUE, directional = 1)
+highlight.sector(rownames(mat.1)[1:3], track.index = 1, col = "#A6CEE359",text = "Immune System",cex = 0.8,niceFacing = TRUE,padding = c(-3,0,4,0))
+highlight.sector(rownames(mat.1)[4:6], track.index = 1, col = "#FB9A9959",text = "Keratinocyte",cex = 0.8,niceFacing = TRUE,padding = c(-3,0,4,0))
+highlight.sector(rownames(mat.1)[7:9], track.index = 1, col = "#E31A1C59",text = "Epithelial Cell",cex = 0.8, niceFacing = TRUE,padding = c(-3,0,4,0))
+highlight.sector(rownames(mat.1)[10:12], track.index = 1, col = "#33A02CFF",text = "Cervical Carcinoma",cex = 0.8, niceFacing = TRUE,padding = c(-3,0,4,0))
+highlight.sector(rownames(mat.1)[13:15], track.index = 1, col = "#B2DF8AFF",text = "Cervical Carcinoma",cex = 0.8, niceFacing = TRUE,padding = c(-3,0,4,0))
+highlight.sector(rownames(mat.1)[16:18], track.index = 1, col = "#FDBF6F59",text = "Stratified Epithelium",cex = 0.8, niceFacing = TRUE,padding = c(-3,0,4,0))
+highlight.sector(rownames(mat.1)[19], track.index = 1, col = "#FF7F0059",text = "Muscle",cex = 0.8, niceFacing = TRUE,padding = c(-3,0,4,0))
+highlight.sector(rownames(mat.1)[20:22], track.index = 1, col = "#CAB2D659",text = "Stromal Cell",cex = 0.8, niceFacing = TRUE,padding = c(-3,0,4,0))
+highlight.sector(rownames(mat.1)[23:25], track.index = 1, col = "#6A3D9A59",text = "Skin",cex = 0.8, niceFacing = TRUE,padding = c(-3,0,4,0))
+highlight.sector(rownames(mat.1)[26:28], track.index = 1, col = "#B1592859",text = "Blood Vessel",cex = 0.8, niceFacing = TRUE,padding = c(-3,0,4,0))
+circos.clear()
+```
+
+
+```{r heatmap_bar_plot}
+mylevels <- mixedsort(unique(merged.DE.data$new_cluster))
+merged.DE.data@meta.data$new_cluster <- factor(x = merged.DE.data@meta.data$new_cluster , levels = mylevels)
+Idents(merged.DE.data) <- "new_cluster"
+
+clust_pro <- as.data.frame(table(merged.DE.data[[c("new_cluster","S01")]]))
+#clust_pro<- filter(clust_pro, cluster != "unassigned")
+totals <- clust_pro %>%
+  dplyr::group_by(S01) %>%
+  dplyr::summarise(sum(Freq)) 
+
+totals <- as.data.frame(totals)
+colnames(totals) <- c("S01","Total")
+
+i <- 1
+while (i<=length(clust_pro$S01)) {
+  if (clust_pro$S01[i] %in% totals$S01) {
+    print(i)
+    z <- clust_pro$S01[i]
+    clust_pro$percent[i] <- round(clust_pro$Freq[i]*100/(as.numeric(filter(totals, S01 == z)[2])),2)
+  }
+  i<-i+1
+}
+
+clust_pro <- arrange(clust_pro, new_cluster)
+
+# Add lines to the initial dataset
+empty_bar <- 1
+to_add <- data.frame(matrix(NA, empty_bar*nlevels(clust_pro$new_cluster), ncol(clust_pro)) )
+colnames(to_add) <- colnames(clust_pro)
+to_add$new_cluster <- rep(levels(clust_pro$new_cluster), each=empty_bar)
+clust_pro <- rbind(clust_pro, to_add)
+clust_pro <- clust_pro %>% arrange(new_cluster)
+clust_pro$id <- seq(1, nrow(clust_pro))
+ 
+
+ggplot(clust_pro,aes(fill=new_cluster, y=percent, x=id))+ 
+    geom_bar(stat = "identity", fill= rep(c("#4CB2F9","#FF4949"),10))+
+  geom_text(data=clust_pro, aes(x=id, y = percent+8,label=percent),size = 4, angle = 90)+
+  #xlim(0,30)+
+  ylim(0,300)+
+  theme_minimal()+
+  theme(axis.text = element_blank(),axis.title = element_blank(),panel.grid = element_blank())
+
+```
+
+# Proportions per tissue sample
+
+```{r Phase_Cluster_circles_new}                     
+clust_pro <- as.data.frame(table(merged.DE.data[[c("new_cluster","S01")]]))
+totals <- clust_pro %>%
+  dplyr::group_by(S01) %>%
+  dplyr::summarise(sum(Freq)) 
+
+totals <- as.data.frame(totals)
+colnames(totals) <- c("S01","Total")
+
+i <- 1
+while (i<=length(clust_pro$S01)) {
+  if (clust_pro$S01[i] %in% totals$S01) {
+    print(i)
+    z <- clust_pro$S01[i]
+    clust_pro$percent[i] <- round(clust_pro$Freq[i]*100/(as.numeric(filter(totals, S01 == z)[2])),2)
+  }
+  i<-i+1
+}
+
+
+# Add lines to the initial dataset
+empty_bar <- 3
+to_add <- data.frame(matrix(NA, empty_bar*nlevels(clust_pro$S01), ncol(clust_pro)) )
+colnames(to_add) <- colnames(clust_pro)
+to_add$S01 <- rep(levels(clust_pro$S01), each=empty_bar)
+clust_pro <- rbind(clust_pro, to_add)
+clust_pro <- clust_pro %>% arrange(S01)
+clust_pro$id <- seq(1, nrow(clust_pro))
+ 
+# Get the name and the y position of each label
+label_data <- clust_pro
+number_of_bar <- nrow(label_data)
+angle <- 90 - 360 * (label_data$id-0.5) /number_of_bar     # I substract 0.5 because the letter must have the angle of the center of the bars. Not extreme right(1) or extreme left (0)
+label_data$hjust <- ifelse( angle < -90, 1, 0)
+label_data$angle <- ifelse(angle < -90, angle+180, angle)
+
+base_data <- clust_pro %>% 
+  dplyr::group_by(S01) %>% 
+  dplyr::summarize(start=min(id), end=max(id) - empty_bar) %>% 
+  dplyr::rowwise() %>% 
+  dplyr::mutate(title=mean(c(start, end)))
+
+
+
+ggplot(clust_pro,aes(fill=new_cluster, y=percent, x=id))+ 
+    geom_bar(stat = "identity",fill=c(bew_pal_new,bew_pal_new))+
+   xlim(0,30)+ylim(-7,25)+geom_text(data=label_data, aes(x=id, y = percent+1,label=percent),size = 2)+ 
+    geom_segment(data=base_data, aes(x = start, y = -0, xend = end, yend = -0), colour = "black", alpha=0.8, size=0.6 , inherit.aes = FALSE)+
+    geom_text(data=base_data, aes(x = title, y = -3, label=S01),colour = "black", alpha=0.8, size=4, fontface="bold", inherit.aes = FALSE)+
+     coord_polar("x", start = 20)+theme_minimal()+
+  theme(axis.text = element_blank(),axis.title = element_blank(),panel.grid = element_blank())
+ 
+
+phase_pro <- as.data.frame(table(seuratObjS01old[[c("new_cluster","Cell_Phase_new")]]))
+phase_pro<- filter(phase_pro, new_cluster != "unassigned")
+totals <- phase_pro %>%
+  dplyr::group_by(new_cluster) %>%
+  dplyr::summarise(sum(Freq)) 
+
+totals <- as.data.frame(totals)
+colnames(totals) <- c("new_cluster","Total")
+
+i <- 1
+while (i<=length(phase_pro$new_cluster)) {
+  if (phase_pro$new_cluster[i] %in% totals$new_cluster) {
+    print(i)
+    z <- phase_pro$new_cluster[i]
+    phase_pro$percent[i] <- round(phase_pro$Freq[i]*100/(as.numeric(filter(totals, new_cluster == z)[2])),1)
+  }
+  i<-i+1
+}
+
+
+empty_bar <- 2
+to_add <- data.frame(matrix(NA, empty_bar*nlevels(phase_pro$new_cluster), ncol(phase_pro)) )
+colnames(to_add) <- colnames(phase_pro)
+to_add$new_cluster <- rep(levels(phase_pro$new_cluster), each=empty_bar)
+phase_pro <- rbind(phase_pro, to_add)
+phase_pro <- phase_pro %>% arrange(new_cluster)
+phase_pro$id <- seq(1, nrow(phase_pro))
+ 
+# Get the name and the y position of each label
+label_data <- phase_pro
+number_of_bar <- nrow(label_data)
+angle <- 90 - 360 * (label_data$id-0.5) /number_of_bar     # I substract 0.5 because the letter must have the angle of the center of the bars. Not extreme right(1) or extreme left (0)
+label_data$hjust <- ifelse( angle < -90, 1, 0)
+label_data$angle <- ifelse(angle < -90, angle+180, angle)
+
+base_data <- phase_pro %>% 
+   dplyr::group_by(new_cluster) %>% 
+   dplyr::summarize(start=min(id), end=max(id) - empty_bar) %>% 
+   dplyr::rowwise() %>% 
+   dplyr::mutate(title=mean(c(start, end)))
+
+
+
+ggplot(phase_pro,aes(fill=Cell_Phase_new, y=percent, x=id))+ 
+    geom_bar(stat = "identity", fill = rep(phase_palate,10))+
+   xlim(0,dim(phase_pro)[1])+ylim(-170,111)+geom_text(data=label_data, aes(x=id, y = percent+15,label=percent),size = 4, angle = label_data$angle)+ 
+    geom_segment(data=base_data, aes(x = start-1, y = -3, xend = end+1, yend = -3), colour = bew_pal_new, alpha=0.8, size=2 , inherit.aes = FALSE)+
+    geom_text(data=base_data, aes(x = title, y = -15, label=new_cluster),colour = bew_pal_new, alpha=0.8, size=4, fontface="bold", inherit.aes = FALSE)+
+     coord_polar()+theme_minimal()+
+  theme(axis.text = element_blank(),axis.title = element_blank(),panel.grid = element_blank())
+
+
+#### Get image for center of plot
+
+Idents(seuratObjS01_ss) <- "tissue"
+tumour_sub <- subset(seuratObjS01_ss, ident = "S01_147_Rep_1")
+
+coord <- GetTissueCoordinates(object = tumour_sub)
+# calculate the aspect ratio of rows to columns
+myratio <- (max(coord$imagerow) - min(coord$imagerow)) / (max(coord$imagecol) - min(coord$imagecol))
+
+Idents(tumour_sub) <- "cluster"
+cboth <- subset(tumour_sub, ident = c("4","5"))
+
+spots_list <- c()
+phase_list <- c()
+i <- 1
+while ( i <= length(tumour_sub$cluster)) {
+  if ( tumour_sub$cluster[[i]] == "4" | tumour_sub$cluster[[i]] == "5") {
+    c <- tumour_sub$cluster[[i]]
+    d <- tumour_sub$Cell_Phase[[i]]
+  } else {
+    c <- "NA"
+    d <- "NA"
+  }
+  spots_list <- c(spots_list, c)
+  phase_list <- c(phase_list, d)
+  
+  i <- i + 1
+}
+rownames(spots_list) <- rownames(tumour_sub$cluster)
+rownames(phase_list) <- rownames(tumour_sub$cluster)
+
+tumour_sub <- AddMetaData(tumour_sub, spots_list, col.name = "grey_clusters")
+
+tumour_sub <- AddMetaData(tumour_sub, phase_list, col.name = "grey_phase")
+
+
+SpatialDimPlot(cboth, group.by = "cluster", cols = c("#FB9A99", "#E31A1C"),pt.size.factor = 1, crop = TRUE)+ theme(aspect.ratio = myratio)+ NoLegend()
+
+SpatialDimPlot(cboth, group.by = "Cell_Phase", cols = phase_palate, pt.size.factor = 1, crop = TRUE) +theme(aspect.ratio = myratio) + NoLegend()
+
+SpatialDimPlot(tumour_sub, group.by = "grey_phase", cols = c("#457B9D", "#ED553B", "darkgrey", "#F6D55C"),pt.size.factor = 1, crop = TRUE)+ theme(aspect.ratio = myratio)+ NoLegend()
+
+
+```
+
+
+# Genes of interest from MAR21 sample
+```{r genes_of_interest_new}
+oncogene_list <- c("RCL1","PCLAF","MYC","KDM4C","DSC3","UHRF2","NUSAP1","PSIP1","LNX2")
+prognosis_list <-c("HSPH1","EIF4A2","ANGPTL4", "HSP90AA1","HSPA1A","UBE2C","KRT8","NFIB","IL12RB2")
+drug_list <-c("NDRG1", "SOX4","GAS1","POLR1D","SNAI2","NXPH4","IL33","PLOD2","RUVBL1","ALCAM","SLC2A1")
+adaptive_immunity_list <-c("SLC2A1")
+
+DotPlot(merged.DE.data,assay = "SCT", features = oncogene_list, cols = c("red","blue"))
+DotPlot(merged.DE.data,assay = "SCT", features = prognosis_list, cols = c("lightyellow","blue"))
+DotPlot(merged.DE.data,assay = "SCT", features = drug_list, cols = c("blue","lightyellow","red"))
+DotPlot(merged.DE.data,assay = "SCT", features = adaptive_immunity_list, cols = c("lightyellow","blue"))
+
+levels(S01_new_norm) <- as.factor(c(0:9))
+StackedVlnPlot(S01_new_norm,features = oncogene_list, color.use = bew_pal_new)+ ggtitle("Oncogenes")
+
+StackedVlnPlot(S01_new_norm, features =prognosis_list, color.use = bew_pal_new)+ ggtitle("Poor Prognosis Biomarkers")
+
+StackedVlnPlot(S01_new_norm, features = drug_list, color.use = bew_pal_new) + ggtitle("Drug Resistance")
+
+feature_list <- c("TGFB1","VEGFA","TF","TFRC","CA9","PGF","MCM7","EGFR","SEMA4B","PDCD1","CD274","EGLN3","GMPS","PTGFRN","ITGA2","OPA1","NSD2","MLF1","CA12") #no "PFKB3"
+
+gene_plots <- lapply(feature_list, function(x) {
+  SpatialFeaturePlot(S01_new_norm, features = x, pt.size.factor = 1.4, image.alpha = 0.8)+theme(aspect.ratio = myratio_new)
+})
+
+i <- 1
+#do.call("grid.arrange", c(gene_plots,ncols = 5))
+for (plot in gene_plots) {
+  ggsave(paste0("/Users/andrewcauser/Documents/Masters/R_Figures/New_feature_plots/feature_plot_",i,".pdf"),plot= plot)
+  i <- i+1
+}
+
+
+
+SpatialFeaturePlot(S01_new_norm, features = c("CD274","PDCD1","VEGFA"))+theme(aspect.ratio = myratio_new) # drug resistance
+
+
+
+df <- AverageExpression(S01_new_norm, assays = "SCT", features = genes_of_interest, group.by = "new_cluster", slot = "scale.data")
+df <- as.matrix(df$SCT)
+
+
+annot_col <-data.frame(cluster = as.factor(c("c0","c1","c2","c3","c4","c5","c6","c7","c8")))
+rownames(annot_col) <- colnames(df)
+
+annot_row<- data.frame(Group  = factor(rep(c("oncogene list","prognosis list","drug list","adaptive immunity list"), c(8,7,7,1))))
+rownames(annot_row) <- rownames(df)
+
+gaps<- c(8,15,22,23)
+
+col_gaps <- c(0:8)
+
+                                            
+annot_colours <- list(cluster = c(c0 = "#A6CEE3", c1= "#6A3D9A", c2 = "#FF7F00", c3 = "#1F78B4", c4 ="#33A02C", c5 ="#E31A1C", c6 = "#FDBF6F", c7 = "#B2DF8A", c8 ="#CAB2D6"), Group = c("oncogene list" = "red","prognosis list" = "orange","drug list" =  "green", "adaptive immunity list" = "blue"))
+
+
+pht <- pheatmap(df, cluster_cols = FALSE, cluster_rows = FALSE, annotation_row = annot_row,gaps_row = gaps, annotation_colors = annot_colours, angle = "90", annotation_col = annot_col, gaps_col = col_gaps, annotation_legend = FALSE)
+
+
+df <- AverageExpression(S01_new_norm, assays = "SCT", features = genes_of_interest, group.by = "new_cluster", slot = "scale.data")
+df <- as.matrix(df$SCT)
+
+
+x <- VlnPlot(S01_new_norm, features = genes_of_interest,stack = TRUE,assay = "SCT",slot = "scale.data")
+i <- 1
+col_list <- c()
+while (i <= length(x$data$feature)){
+  clst <- x$data$ident[i]
+  gene <- x$data$feature[i]
+  v <- df[gene,clst]
+  col_list <- c(col_list,v)
+  i<- i+1
+}
+
+x$data$colour <- col_list
+
+vln_plots <- lapply(unique(x$data$feature), function(i){
+  y <- subset(x$data, feature ==i)
+  ggplot(y, aes(x = ident, y = expression, fill = colour))+geom_violin(draw_quantiles = NULL, na.rm = FALSE, orientation = NA)+ stat_ydensity(trim = TRUE, scale = "width", adjust = 1)+NoLegend()+theme(axis.text.x = element_blank(), axis.title.x = element_blank(), panel.background = element_blank(), panel.grid = element_blank(), axis.title.y = element_blank(), axis.ticks.x = element_blank()) + scale_fill_gradientn(limits = c(-1.2,2), colours = c("#075AFF","#FFFFCC","#FF0000"), na.value = c("#FF0000")) + ylim(-1,4)
+})
+
+do.call("grid.arrange", c(vln_plots, ncol=1))
+
+```
+
+# Genes of interest from integrated MAR21 and SEP21 analysis
+```{r heat_map_gene_type_redo}
+
+poor_prog <- c("SOX4",
+"SLC2A1",
+"KRT8",
+"EIF4A2",
+"SNAI2",#
+"CA12",
+"HSPH1",
+"ANGPTL4",
+"FAM162A",
+"PFKP")
+
+oncogenes <- c("TGFBI",
+"UHRF2",
+"PSIP1",
+"MYC",
+"RCL1",
+"KDM4C",
+"ACTL6A",
+"CHAF1A",#
+"DEK",
+"ECT2")
+
+drug_resistance <- c("POLR1D",
+"GAS1",
+"PLOD2",
+"DDIT4",
+"IL33",
+"ABCC5",
+"ALCAM",
+"CALCRL",#
+"MKNK2",#
+"MT2A")
+
+gene_list <- c(poor_prog, oncogenes, drug_resistance)
+
+df <- AverageExpression(S01_norm, assays = "SCT", features = gene_list, group.by = "sub.tumour.group", slot = "scale.data")
+df <- as.matrix(df$SCT)
+
+
+annot_col <-data.frame(cluster = as.factor(c("c0","c1","c2","c3","c4","c5","c6","c7","c8","c9","c10")))
+rownames(annot_col) <- colnames(df)
+
+annot_row<- data.frame(Group  = factor(rep(c("oncogene list","prognosis list","drug list"), c(10,10,10))))
+rownames(annot_row) <- rownames(df)
+
+gaps<- c(10,20,30)
+
+col_gaps <- c(1:10)
+
+                                            
+annot_colours <- list(cluster = c(c0 = "#A6CEE3", c1= "#1F78B4", c2 = "#FB9A99", c3 = "#E31A1C", c4 ="#33A02C", c5 ="#FDBF6F", c6 = "#FF7F00", c7 = "#CAB2D6", c8 ="#6A3D9A", c9 = "#B15928", c10 = "#B2DF8A"), Group = c("oncogene list" = "red","prognosis list" = "orange","drug list" =  "green", "adaptive immunity list" = "blue"))
+
+
+pht <- pheatmap(df, cluster_cols = FALSE, cluster_rows = FALSE, annotation_row = annot_row, show_rownames = TRUE,gaps_row = gaps, annotation_colors = annot_colours, angle = "90", annotation_col = annot_col, gaps_col = col_gaps, annotation_legend = FALSE, scale = "row")
+
+
+
+poor_prog <- c("SOX4",
+"SLC2A1",
+"KRT8",
+"EIF4A2",
+#"SNAI2",#Not in sample
+"CA12",
+"HSPH1",
+"ANGPTL4",
+"FAM162A",
+"PFKP",
+"NDRG1" #marker upregulated by new sample
+)
+
+oncogenes <- c("TGFBI",
+"UHRF2",
+"PSIP1",
+"MYC",
+"RCL1",
+"KDM4C",
+"ACTL6A",
+#"CHAF1A",#Not in sample
+"DEK",
+"ECT2",
+"CALB1" #marker upregulated by new sample
+)
+
+drug_resistance <- c("POLR1D",
+"GAS1",
+"PLOD2",
+"DDIT4",
+"IL33",
+"ABCC5",
+"ALCAM",
+#"CALCRL",#Not in sample
+#"MKNK2",#Not in sample
+"MT2A",
+"NCK1", #maker from old list
+"NUSAP1" #marker upregulated by new sample
+)
+
+gene_list <- c(poor_prog, oncogenes, drug_resistance)
+
+
+
+df <- AverageExpression(S01_new_norm, assays = "SCT", features = gene_list, group.by = "new_cluster", slot = "scale.data")
+df <- as.matrix(df$SCT)
+
+
+annot_col <-data.frame(cluster = as.factor(c("c0","c1","c2","c3","c4","c5","c6","c7","c8")))
+rownames(annot_col) <- colnames(df)
+
+annot_row<- data.frame(Group  = factor(rep(c("oncogene list","prognosis list","drug list"), c(10,10,10))))
+rownames(annot_row) <- rownames(df)
+
+gaps<- c(10,20,30)
+
+col_gaps <- c(1:8)
+
+                                            
+annot_colours <- list(cluster = c(c0 = "#A6CEE3", c1= "#1F78B4", c2 = "#FB9A99", c3 = "#E31A1C", c4 ="#33A02C", c5 ="#FDBF6F", c6 = "#FF7F00", c7 = "#CAB2D6", c8 ="#6A3D9A"), Group = c("oncogene list" = "red","prognosis list" = "orange","drug list" =  "green"))
+
+
+pht_new <- pheatmap(df, cluster_cols = FALSE, cluster_rows = FALSE, annotation_row = annot_row, show_rownames = TRUE,gaps_row = gaps, annotation_colors = annot_colours, angle = "90", annotation_col = annot_col, gaps_col = col_gaps, annotation_legend = FALSE, scale = "row")
+
+pht_new
+```
+
+```{r updatated_experimental_clinical_druggable_target_plots}
+outdir.fig3_redo <- paste0(outdir.fig3,"redo/")
+dir.create(outdir.fig3_redo)
+
+
+clinical_markers <- c("VEGFA","PGF","CA9","TF","CKB","DUT","EGFR","MCM7")
+
+Experimental_markers <- c("CLDN1", "PFKFB3","TFRC","CXCL8","ITGA2","ADM","CIB1","FADS2","HSP90AA1","OPA1")
+
+PD_markers <- c("PDCD1", "CD274")
+
+plots <- SpatialFeaturePlot(S01_norm, features = clinical_markers, pt.size.factor = 1.3, combine = FALSE)
+
+c <- 1
+for (i in plots) {
+  ggsave(plot = i, filename = paste0(outdir.fig3_redo,"Spatial_Fig_", c,"clinical_old.pdf"))
+c <- c+1
+}
+
+plots <- SpatialFeaturePlot(S01_norm, features = Experimental_markers, pt.size.factor = 1.3, combine = FALSE)
+
+for (i in plots) {
+  ggsave(plot = i, filename = paste0(outdir.fig3_redo,"Spatial_Fig_", c,"experimental_old.pdf"))
+c <- c+1
+}
+
+
+plots <- SpatialFeaturePlot(S01_new_norm, features = clinical_markers, pt.size.factor = 1.8, combine = FALSE)
+
+c <- 1
+for (i in plots) {
+  ggsave(plot = i, filename = paste0(outdir.fig3_redo,"Spatial_Fig_", c,"clinical_new.pdf"))
+c <- c+1
+}
+
+plots <- SpatialFeaturePlot(S01_new_norm, features = Experimental_markers, pt.size.factor = 1.8, combine = FALSE)
+
+for (i in plots) {
+  ggsave(plot = i, filename = paste0(outdir.fig3_redo,"Spatial_Fig_", c,"experimental_new.pdf"))
+c <- c+1
+}
+
+
+plots <- SpatialFeaturePlot(S01_norm, features = PD_markers, pt.size.factor = 1.3, combine = FALSE)
+
+c <- 1
+for (i in plots) {
+  ggsave(plot = i, filename = paste0(outdir.fig3_redo,"Spatial_Fig_", c,"_PDs_old.pdf"))
+c <- c+1
+}
+
+plots <- SpatialFeaturePlot(S01_new_norm, features = PD_markers, pt.size.factor = 1.8, combine = FALSE)
+
+for (i in plots) {
+  ggsave(plot = i, filename = paste0(outdir.fig3_redo,"Spatial_Fig_", c,"_PDs_new.pdf"))
+c <- c+1
+}
+
+
+SpatialFeaturePlot(S01_new_norm, features = c("HMGB1"), pt.size.factor = 1.8, combine = FALSE)
+```
+
+
+# New Upregulated Genes in individual SEP21 clustering
+```{r new_genes}
+Idents(S01_new_norm) <- "new_cluster_only"
+New_markers <- FindAllMarkers(S01_new_norm, assay = "SCT", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) %>% filter(p_val_adj <= 0.05)
+write.table(New_markers, file = paste0(outputdir.new,"pos_markers_New_cluster_only.txt"), sep = "\t", quote = FALSE, col.names = NA)
+```
+
+# Bulk RNA comparision
+
+```{r bluk}
+
+Idents(S01_norm) <- "sample"
+tum <- subset(S01_norm, ident = "tumour")
+health <- subset(S01_norm, ident = "healthy")
+
+drug_targets <- c(clinical_markers, Experimental_markers, PD_markers)
+
+
+bulk_calc <- function(dataset){
+  gene_names <- rownames(dataset@assays$SCT@data)
+  bulk_counts <- c()
+
+  i <- 1
+  while (i <= length(rownames(dataset@assays$SCT@data))) {
+    tot <- sum((dataset@assays$SCT@counts)[i,])
+    bulk_counts <- c(bulk_counts,tot)
+    i<- i+1
+  }
+
+  x <- data.frame("Gene" = gene_names, "bulk" = bulk_counts)
+  rownames(x) <- x[,1]
+  x <- x[-1]
+
+  rank_x <- x %>% 
+  # desc orders from largest to smallest
+    arrange(desc(bulk)) 
+
+  return(rank_x)
+}
+
+S01_bulk <- bulk_calc(tum)
+healthy_bulk <- bulk_calc(health)
+S01_new_bulk <- bulk_calc(S01_new_norm)
+
+get_rank <- function(dataset){
+  rank_num <- c()
+  for ( i in drug_targets) {
+    rank_num <- c(rank_num, which(rownames(dataset) == i))
+  }
+  rank_df <- data.frame("Gene" = drug_targets, "Rank" = rank_num)
+  rownames(rank_df) <- rank_df[,1]
+  rank_df <- rank_df[-1]
+  return(rank_df)
+}
+
+S01_bulk_targ <- get_rank(S01_bulk)
+healthy_bulk_targ  <- get_rank(healthy_bulk)
+S01_new_bulk_targ  <- get_rank(S01_new_bulk)
+
+combined_rank <- S01_bulk_targ
+combined_rank["S01_old"] <- S01_bulk_targ$Rank
+combined_rank["S01_new"] <- S01_new_bulk_targ$Rank
+combined_rank["S01_healthy"] <- healthy_bulk_targ$Rank
+combined_rank <- combined_rank[-1]
+combined_rank
+```
+
+
+
+# Save Seurat objects as RDS
+
+```{r save_all_as_RDS}
+
+saveRDS(seuratObjS01_ss, "/Volumes/SPOPSCC-Q4358/Finalised_S01/seuratObjS01_ss.RDS")
+saveRDS(seuratObjS01, "/Volumes/SPOPSCC-Q4358/Finalised_S01/seuratObjS01.RDS")
+saveRDS(seuratObjS01new, "/Volumes/SPOPSCC-Q4358/Finalised_S01/seuratObjS01new.RDS")
+saveRDS(S01_old_norm, "/Volumes/SPOPSCC-Q4358/Finalised_S01/S01_old_norm.RDS")
+
+```
+

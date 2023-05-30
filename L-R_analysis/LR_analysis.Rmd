@@ -1,0 +1,380 @@
+---
+title: "LR_analysis"
+author: "Andrew Causer"
+date: "2023-04-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r include=FALSE}
+#libraries required for importation
+library(Seurat) #‘4.0.3’
+library(ggplot2)
+library(dplyr)
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+if (!requireNamespace("scran", quietly = TRUE))
+  install.packages("scran")
+#library(scran)
+library(scater)
+#library(PCAtools)
+library(tibble)
+library(SingleCellExperiment)
+library(hdf5r) 
+library(patchwork)
+library(gtools)
+library(clustree)
+
+#BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+#BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+#BiocManager::install("ComplexHeatmap")
+library(ComplexHeatmap)
+library(stringr)
+library(magick)
+#library(SpatialExperiment)
+library(gridExtra)
+
+#remotes::install_github('JEFworks-Lab/MERINGUE')
+library(MERINGUE)
+library(EnhancedVolcano)
+library(GOplot)
+library(tidyr)
+library(circlize)
+
+library(readr)
+```
+
+
+####### L-R analysis generated in stlearn ####
+
+```{r}
+#Test if top hits of whole LR dataset are just background
+old_feature_list <- c("COL1A2","COL1A1","CD44","B2M","HLA-F","S100A9","S100A8","TLR4")
+new_feature_list <- c("S100A9","S100A8","TLR4","NECTIN1","NECTIN4","ANXA1","FPR3","APOD","LEPR","NECTIN2")
+
+
+generate_feature_plots <- function(sample, feature){
+  x <- SpatialFeaturePlot(sample, features = feature)
+  print(x)
+}
+
+for (i in old_feature_list) {
+  generate_feature_plots(S01_norm, i)
+}
+
+for (i in new_feature_list) {
+  generate_feature_plots(S01_new_norm, i)
+}
+
+```
+
+# Import LR data from stlearn
+
+``` {r stlearn}
+outputdir.stlearn <- paste0(outputdir,"/stlearn/")
+dir.create(outputdir.stlearn)
+
+#TF <- read.csv("/Volumes/SPOPSCC-Q4358/stlearn/TF_TFRC_Spots.csv")
+VEGFA_old <- read.csv("/Volumes/SPOPSCC-Q4358/stlearn/VEGFA_NRP1_Spots_old_sig.csv") 
+VEGFA_new <- read.csv("/Volumes/SPOPSCC-Q4358/stlearn/VEGFA_NRP1_Spots_new_sig.csv") 
+VEGFA_old_spot <- read.csv("/Volumes/SPOPSCC-Q4358/stlearn/VEGFA_NRP1_Spots_old.csv") 
+VEGFA_new_spot <- read.csv("/Volumes/SPOPSCC-Q4358/stlearn/VEGFA_NRP1_Spots_new.csv") 
+
+TF_new <- read.csv("/Volumes/SPOPSCC-Q4358/stlearn/TF_TFRC_Spots_new_sig.csv") 
+TF_old <- read.csv("/Volumes/SPOPSCC-Q4358/stlearn/TF_TFRC_Spots_old_sig.csv") 
+TF_new_spot <- read.csv("/Volumes/SPOPSCC-Q4358/stlearn/TF_TFRC_Spots_new.csv") 
+TF_old_spot <- read.csv("/Volumes/SPOPSCC-Q4358/stlearn/TF_TFRC_Spots_old.csv") 
+
+
+rownames(VEGFA_new) <- VEGFA_new$X
+rownames(VEGFA_old) <- VEGFA_old$X
+rownames(VEGFA_new_spot) <- VEGFA_new_spot$X
+rownames(VEGFA_old_spot) <- VEGFA_old_spot$X
+rownames(TF_new) <- TF_new$X
+rownames(TF_old) <- TF_old$X
+rownames(TF_new_spot) <- TF_new_spot$X
+rownames(TF_old_spot) <- TF_old_spot$X
+
+
+add_back <- function (sr_obj,stlearn_obj, label) {
+  
+  clusters_lables <- as.data.frame(stlearn_obj[c("X",label)])
+
+  i <- 1
+  len <- dim(sr_obj[[]])[1]
+  cluster_coords <- c()
+
+  while (i <= len) {
+    spot <- sr_obj[[]][i,]
+    if (spot[4] %in% clusters_lables$X) {
+      st.label <- clusters_lables[paste0(spot[4]),][2]
+    } else {
+      st.label <- "unassigned"
+    }
+    cluster_coords <- c(cluster_coords, paste0(st.label)) 
+   i <- i+1
+  }
+  
+  sr_obj <- AddMetaData(sr_obj,cluster_coords,col.name = label)
+  return(sr_obj)
+}
+
+S01_old_stlearn<- add_back(S01_old_norm, VEGFA_old, "sig_veg")
+S01_new_stlearn<- add_back(S01_new_norm, VEGFA_new, "sig_veg")
+S01_old_stlearn<- add_back(S01_old_stlearn, VEGFA_old_spot, "VEGFA_NRP1_binary_labels")
+S01_new_stlearn<- add_back(S01_new_stlearn, VEGFA_new_spot, "VEGFA_NRP1_binary_labels")
+
+S01_old_stlearn<- add_back(S01_old_stlearn, TF_old, "sig_tf")
+S01_new_stlearn<- add_back(S01_new_stlearn, TF_new, "sig_tf")
+S01_old_stlearn<- add_back(S01_old_stlearn, TF_old_spot, "TF_TFRC_binary_labels")
+S01_new_stlearn<- add_back(S01_new_stlearn, TF_new_spot, "TF_TFRC_binary_labels")
+
+
+SpatialDimPlot(S01_new_stlearn, group.by = 'sig_veg', cols = c("grey64","orangered"), pt.size.factor = 1.5)
+SpatialDimPlot(S01_old_stlearn, group.by = 'sig_veg', cols = c("grey64","orangered"), pt.size.factor = 1.1)+theme(aspect.ratio = myratio_old)
+
+SpatialDimPlot(S01_new_stlearn, group.by = 'VEGFA_NRP1_binary_labels', cols = c("grey64","lightskyblue","khaki","orangered"), pt.size.factor = 1.5)
+SpatialDimPlot(S01_old_stlearn, group.by = 'VEGFA_NRP1_binary_labels', cols = c("grey64","lightskyblue","khaki","orangered"), pt.size.factor = 1.1)+theme(aspect.ratio = myratio_old)
+
+VEGFA_list <- c()
+i <- 1
+while (i <= length(S01_new_stlearn$VEGFA_NRP1_binary_labels)){
+  if (S01_new_stlearn$sig_veg[[i]] == "True" & S01_new_stlearn$VEGFA_NRP1_binary_labels[[i]] == "VEGFA_NRP1"){
+    label_LR <- "True"
+  } else {
+    label_LR <- "False"
+  }
+  VEGFA_list <- c(VEGFA_list, label_LR)
+  i <- i + 1
+}
+
+rownames(VEGFA_list) <- rownames(S01_new_stlearn$VEGFA_NRP1_binary_labels)
+S01_new_stlearn <- AddMetaData(S01_new_stlearn, VEGFA_list, col.name = "Sig_VEGFA_NRP1")
+
+SpatialDimPlot(S01_new_stlearn, group.by = 'Sig_VEGFA_NRP1', cols = c("grey64","red"), pt.size.factor = 1.1)+theme(aspect.ratio = myratio_new)
+
+
+VEGFA_list <- c()
+i <- 1
+while (i <= length(S01_old_stlearn$VEGFA_NRP1_binary_labels)){
+  if (S01_old_stlearn$sig_veg[[i]] == "True" & S01_old_stlearn$VEGFA_NRP1_binary_labels[[i]] == "VEGFA_NRP1"){
+    label_LR <- "True"
+  } else {
+    label_LR <- "False"
+  }
+  VEGFA_list <- c(VEGFA_list, label_LR)
+  i <- i + 1
+}
+
+rownames(VEGFA_list) <- rownames(S01_old_stlearn$VEGFA_NRP1_binary_labels)
+S01_old_stlearn <- AddMetaData(S01_old_stlearn, VEGFA_list, col.name = "Sig_VEGFA_NRP1")
+
+SpatialDimPlot(S01_old_stlearn, group.by = 'Sig_VEGFA_NRP1', cols = c("grey64","red"), pt.size.factor = 1.1)+theme(aspect.ratio = myratio_new)
+
+
+TF_list <- c()
+i <- 1
+while (i <= length(S01_old_stlearn$TF_TFRC_binary_labels)){
+  if (S01_old_stlearn$sig_tf[[i]] == "True" & S01_old_stlearn$TF_TFRC_binary_labels[[i]] == "TF_TFRC"){
+    label_LR <- "True"
+  } else {
+    label_LR <- "False"
+  }
+  TF_list <- c(TF_list, label_LR)
+  i <- i + 1
+}
+
+rownames(TF_list) <- rownames(S01_old_stlearn$TF_TFRC_binary_labels)
+S01_old_stlearn <- AddMetaData(S01_old_stlearn, TF_list, col.name = "Sig_TF_TFRC")
+
+SpatialDimPlot(S01_old_stlearn, group.by = 'Sig_TF_TFRC', cols = c("grey64","red"), pt.size.factor = 1.1)+theme(aspect.ratio = myratio_new)
+
+TF_list <- c()
+i <- 1
+while (i <= length(S01_new_stlearn$TF_TFRC_binary_labels)){
+  if (S01_new_stlearn$sig_tf[[i]] == "True" & S01_new_stlearn$TF_TFRC_binary_labels[[i]] == "TF_TFRC"){
+    label_LR <- "True"
+  } else {
+    label_LR <- "False"
+  }
+  TF_list <- c(TF_list, label_LR)
+  i <- i + 1
+}
+
+rownames(TF_list) <- rownames(S01_new_stlearn$TF_TFRC_binary_labels)
+S01_new_stlearn <- AddMetaData(S01_new_stlearn, TF_list, col.name = "Sig_TF_TFRC")
+
+SpatialDimPlot(S01_new_stlearn, group.by = 'Sig_TF_TFRC', cols = c("grey64","red"), pt.size.factor = 1.1)+theme(aspect.ratio = myratio_new)
+
+#Fewer then three cells -> cannot run
+Idents(S01_new_stlearn) <- "Sig_VEGFA_NRP1"
+#markers_VEGFA_new <- FindAllMarkers(S01_new_stlearn, assay = "SCT", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) #%>% filter(p_val_adj <= 0.05)
+#write.table(markers_VEGFA_new, file = paste0(outputdir.stlearn,"pos_markers_VEGFA_new.txt"), sep = "\t", quote = FALSE, #col.names = NA)
+
+Idents(S01_old_stlearn) <- "sig_veg"
+markers_VEGFA_old <- FindAllMarkers(S01_old_stlearn, assay = "SCT", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) %>% filter(p_val_adj <= 0.05)
+write.table(markers_VEGFA_old, file = paste0(outputdir.stlearn,"pos_markers_VEGFA_old.txt"), sep = "\t", quote = FALSE, col.names = NA)
+
+merged_LR <- merge(S01_old_stlearn, y = c(S01_new_stlearn))
+Idents(merged_LR) <- "Sig_VEGFA_NRP1"
+markers_VEGFA_merged <- FindAllMarkers(merged_LR, assay = "SCT", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) %>% filter(p_val_adj <= 0.05)
+#write.table(markers_VEGFA_new, file = paste0(outputdir.stlearn,"pos_markers_VEGFA_merged.txt"), sep = "\t", quote = FALSE, col.names = NA)
+
+
+
+
+Idents(S01_new_stlearn) <- "Sig_TF_TFRC"
+markers_TF_new <- FindAllMarkers(S01_new_stlearn, assay = "SCT", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) %>% filter(p_val_adj <= 0.05)
+write.table(markers_TF_new, file = paste0(outputdir.stlearn,"pos_markers_TF_new.txt"), sep = "\t", quote = FALSE, col.names = NA)
+
+Idents(S01_old_stlearn) <- "sig_tf"
+markers_TF_old <- FindAllMarkers(S01_old_stlearn, assay = "SCT", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) %>% filter(p_val_adj <= 0.05)
+write.table(markers_TF_old, file = paste0(outputdir.stlearn,"pos_markers_TF_old.txt"), sep = "\t", quote = FALSE, col.names = NA)
+
+
+Idents(merged_LR) <- "Sig_TF_TFRC"
+markers_TF_merged <- FindAllMarkers(merged_LR, assay = "SCT", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) %>% filter(p_val_adj <= 0.05)
+write.table(markers_TF_merged, file = paste0(outputdir.stlearn,"pos_markers_TF_merged.txt"), sep = "\t", quote = FALSE, col.names = NA)
+
+
+SpatialDimPlot(S01_new_stlearn, group.by = 'TF_TFRC_binary_labels', cols = c("grey64","lightskyblue","orangered","khaki"), pt.size.factor = 1.8)
+SpatialDimPlot(S01_old_stlearn, group.by = 'TF_TFRC_binary_labels', cols = c("grey64","lightskyblue","orangered","khaki"), pt.size.factor = 1.2)+theme(aspect.ratio = myratio_old)
+
+
+```
+
+
+# G0 of Stlearn LR pairs
+```{r GO_stlearn}
+
+GO_stlearn <- function (st_obj, LR_DE, outdir, LR_pair) {
+print("commencing step 1: Prepare DE gene, gene universe, etc.")
+
+  # First prepare the gene universe
+mycounts <- st_obj@assays$SCT@data
+  # # filter non-expressed
+expgene <- names(which(Matrix::rowSums(mycounts) != 0))
+expcounts <- mycounts[which(rownames(mycounts) %in% expgene),]
+universe <- rownames(expcounts)
+universe_entrez <- mapIds(org.Hs.eg.db, keys=universe, column="ENTREZID", keytype="SYMBOL")
+universe_entrez <- universe_entrez[!(is.na(universe_entrez))]
+
+myDE <- LR_DE
+myDE$direction <- myDE$avg_log2FC
+myDE$direction <- ifelse(myDE$direction<0, "DOWN", "UP")
+DE <- myDE[c("gene","direction","p_val_adj","cluster")]
+
+# Get Entrez codes for DE gene
+# first remove genes that aren't in valid hits, because if they're the only genes for one list it fails
+DE <- DE[DE$gene %in% names(universe_entrez),]
+prep_IDs <- function(list_to_test) {
+  geneList <- pull(DE %>% dplyr::filter(cluster == list_to_test), "gene")
+  myIDs = mapIds(org.Hs.eg.db, column = "ENTREZID", keytype = "SYMBOL", keys = geneList)
+  myIDs = myIDs[!(is.na(myIDs))]
+  return(myIDs)
+}
+all_entrez <- lapply(unique(DE$cluster), prep_IDs)
+names(all_entrez) <- unique(DE$cluster)
+
+
+ck <- compareCluster(geneCluster = all_entrez, fun = "enrichGO", OrgDb = "org.Hs.eg.db", universe = universe_entrez, readable = TRUE, ont = "BP", pvalueCutoff = 0.01, pAdjustMethod = "BH")
+ck_filt <- gsfilter(ck, max = 200)
+ck_filt_simple <- clusterProfiler::simplify(ck_filt, cutoff = 0.5)
+# save output as RDS, txt file, simple dotplot
+## RDS
+#saveRDS(ck_filt_simple, paste0(outdir, LR_pair, "_GOFiltSimp.RDS"))
+## txt file
+tosave <- ck_filt_simple@compareClusterResult
+tosave$GeneRatio <- gsub("\\/", "|", tosave$GeneRatio)
+tosave$BgRatio <- gsub("\\/", "|", tosave$BgRatio)
+write.table(tosave, file = paste0(outdir, LR_pair, "_GO_FiltSimp.txt"), sep = "\t", quote = FALSE, col.names = NA)
+## dotplot
+#pdf(paste0(outdir, LR_pair, "_ClusterMarker_dotplot.pdf"))
+#dotplot(ck_filt_simple, font.size = 8, showCategory = 7)
+#dev.off()
+}
+GO_stlearn(S01_old_stlearn,markers_VEGFA_old,paste0(outputdir.stlearn,"/Pathway_Analysis/"),"VEGFA_old")
+GO_stlearn(S01_new_stlearn,markers_VEGFA_old,paste0(outputdir.stlearn,"/Pathway_Analysis/"),"VEGFA_new")
+GO_stlearn(merged_LR,markers_VEGFA_merged,paste0(outputdir.stlearn,"/Pathway_Analysis/"),"VEGFA_merged")
+GO_stlearn(S01_old_stlearn,markers_TF_old,paste0(outputdir.stlearn,"/Pathway_Analysis/"),"TF_old")
+GO_stlearn(S01_new_stlearn,markers_TF_old,paste0(outputdir.stlearn,"/Pathway_Analysis/"),"TF_new")
+GO_stlearn(merged_LR,markers_TF_merged,paste0(outputdir.stlearn,"/Pathway_Analysis/"),"TF_merged")
+```
+
+# Selects only LR spots
+
+```{r get_only_LR_spots}
+
+lr_spots <-function(seuratObj, col_name, LR_pair){
+  col_name_idx <- which(colnames(seuratObj@meta.data) == paste0(col_name))
+  LR_list <- c()
+  i <- 1
+  while (i <= dim(seuratObj@meta.data[col_name_idx])[1]){
+    if (seuratObj@meta.data[i,col_name_idx] == paste0(LR_pair)){
+      label_LR <- "True"
+    } else {
+      label_LR <- "False"
+    }
+    LR_list <- c(LR_list, label_LR)
+    i <- i + 1
+  }
+  #return(LR_list)
+  #rownames(LR_list) <- rownames(seuratObj@meta.data[col_name_idx])
+  seuratObj <- AddMetaData(seuratObj, LR_list, col.name = paste0(LR_pair,"_spots"))
+  return(seuratObj)
+}
+
+```
+
+# Pathway analysis of the highly expressed L-R pairs
+## DEGs were caculated and pathway analysis was peformed in IPA
+
+```{r pathway_genes}
+
+genes <- read.csv("/Users/andrewcauser/Downloads/TF_VEGFA_GENES.csv")
+TF_genes <- unique(genes$TF_GENES)
+VEGFA_genes <- unique(genes$VEGFA_GENES)
+combo_gene_list <- c(VEGFA_genes,TF_genes)
+length(TF_genes)
+length(VEGFA_genes)
+
+#### Get only stops
+S01_new_stlearn <- lr_spots(S01_new_stlearn, "VEGFA_NRP1_binary_labels", "VEGFA_NRP1")
+S01_old_stlearn <- lr_spots(S01_old_stlearn, "VEGFA_NRP1_binary_labels", "VEGFA_NRP1")
+S01_new_stlearn <- lr_spots(S01_new_stlearn, "TF_TFRC_binary_labels", "TF_TFRC")
+S01_old_stlearn <- lr_spots(S01_old_stlearn, "TF_TFRC_binary_labels", "TF_TFRC")
+
+SpatialDimPlot(S01_new_stlearn, group.by = 'VEGFA_NRP1_spots', cols = c("grey64","red"), pt.size.factor = 1.1)+theme(aspect.ratio = myratio_new)
+
+SpatialDimPlot(S01_old_stlearn, group.by = 'VEGFA_NRP1_spots', cols = c("grey64","red"), pt.size.factor = 1.1)+theme(aspect.ratio = myratio_new)
+
+SpatialDimPlot(S01_new_stlearn, group.by = 'TF_TFRC_spots', cols = c("grey64","red"), pt.size.factor = 1.1)+theme(aspect.ratio = myratio_new)
+
+SpatialDimPlot(S01_old_stlearn, group.by = 'TF_TFRC_spots', cols = c("grey64","red"), pt.size.factor = 1.1)+theme(aspect.ratio = myratio_new)
+
+
+
+Idents(S01_new_stlearn) <- "TF_TFRC_spots"
+x <- DoHeatmap(S01_new_stlearn, features = TF_genes, assay = "SCT", group.bar = TRUE, angle = 0, hjust = 1, draw.lines = FALSE)#+ scale_fill_gradient2(low = "#075AFF",mid = "#FFFFCC",high = "#FF0000", na.value = "white")
+
+
+
+df_Veg <- AverageExpression(S01_new_stlearn, assays = "SCT", features = TF_genes, group.by = "TF_TFRC_spots", slot = "scale.data")
+
+write.csv(df_Veg,"/Volumes/SPOPSCC-Q4358/stlearn/TF_TFRC_new.csv")
+
+
+
+df_Veg <- as.matrix(df_Veg$SCT)
+
+
+pht_veg <- pheatmap(df_Veg, cluster_rows = FALSE, cluster_cols = FALSE)
+
+
+```

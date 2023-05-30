@@ -1,0 +1,168 @@
+---
+title: "RCTD"
+author: "Andrew Causer"
+date: "2023-04-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r include=FALSE}
+#libraries required for importation
+library(Seurat) #‘4.0.3’
+library(ggplot2)
+library(dplyr)
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+if (!requireNamespace("scran", quietly = TRUE))
+  install.packages("scran")
+#library(scran)
+library(scater)
+#library(PCAtools)
+library(tibble)
+library(SingleCellExperiment)
+library(hdf5r) 
+library(patchwork)
+library(gtools)
+library(clustree)
+
+#BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+#BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+#BiocManager::install("ComplexHeatmap")
+library(ComplexHeatmap)
+library(stringr)
+library(magick)
+#library(SpatialExperiment)
+library(gridExtra)
+
+
+library(EnhancedVolcano)
+library(GOplot)
+library(tidyr)
+library(circlize)
+library(readr)
+library(spacexr)
+```
+
+# Load data and Single cell reference dataset
+```{r load_data}
+
+#Visium data
+S01_old_norm <- readRDS("/Volumes/SPOPSCC-Q4358/Finalised_S01/S01_old_norm.RDS")
+S01_norm <- readRDS("/Volumes/SPOPSCC-Q4358/Finalised_S01/S01_norm.RDS")
+
+# scRNA-seq Reference data
+x<-read.table("/Users/andrewcauser/Downloads/GSE181919_Barcode_metadata.txt.gz")
+y <- read.table("/Users/andrewcauser/Downloads/GSE181919_UMI_counts.txt.gz")
+```
+
+
+# Pre-processing of Single Cell Dataset 
+```{r inport_dataset}
+
+colnames(y) <- gsub("\\.","-",colnames(y))
+x_y <- CreateSeuratObject(counts = y, meta.data = x)
+sort(table(x_y@meta.data$cell.type))
+barplot(sort(table(x_y@meta.data$cell.type)), las = 2)
+
+x_y[['Barcode']] <- rownames(x_y@meta.data)
+
+Idents(x_y) <- "cell.type"
+
+x_y_T <- SCTransform(x_y, assay = "RNA", verbose = FALSE)
+
+cell_markers_xy <- FindAllMarkers(x_y_T, assay = "SCT", slot = "data", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+```
+
+# Visium data preprocessing for deconvolution
+```{r visium_preprocess_decon}
+x_y_T <- FindVariableFeatures(x_y_T, selection.method = "vst", nfeatures = 2000,
+        verbose = FALSE, assay = "SCT")
+x_y_T <- RunPCA(x_y_T, npcs = 30, verbose = FALSE)
+x_y_T <- RunUMAP(x_y_T, reduction = "pca", dims = 1:30)
+
+
+visium_data <- RunPCA(S01_old_norm, npcs = 30, verbose = FALSE)
+visium_data <- RunUMAP(visium_data, reduction = "pca", dims = 1:30)
+DimPlot(x_y_T, reduction = "umap", group.by = "cell.type", label = TRUE) #+ NoLegend()
+
+Idents(visium_data) <- "cluster"
+```
+
+
+# RCTD Deconvolution
+```{r RCTD_Decon}
+counts <- as.data.frame(visium_data@assays$SCT@counts)
+coords <- GetTissueCoordinates(visium_data)
+nUMI <- colSums(counts)
+puck <- SpatialRNA(coords, counts, nUMI)
+barcodes <- colnames(puck@counts)
+plot_puck_continuous(puck, barcodes, puck@nUMI, ylimit = c(0,round(quantile(puck@nUMI,0.9))), 
+                       title ='plot of nUMI')
+
+x_y_T$cluster <- as.factor(x_y_T$cell.type)
+Idents(x_y_T) <- "cluster"
+
+cell_types_input <- x_y_T$cluster
+names(cell_types_input) <- row.names(x_y_T@meta.data) 
+
+Idents(x_y_T) <- "cluster"
+
+
+counts <- as.data.frame(x_y_T@assays$SCT@counts)
+# counts <- mutate_all(counts, function(x) as.numeric(as.character(x)))
+# counts <- counts %>% mutate_if(is.numeric, round)
+reference <- Reference(counts,cell_types = cell_types_input)
+myRCTD <- create.RCTD(puck, reference, max_cores = 2)
+myRCTD <- run.RCTD(myRCTD, doublet_mode = 'full')
+barcodes <- colnames(myRCTD@spatialRNA@counts)
+weights <- myRCTD@results$weights
+norm_weights <- normalize_weights(weights)
+cell_types <- c("B_Plasma.cells",   "Dendritic.cells", "Endothelial.cells",  "Epithelial.cells",       "Fibroblasts",       "Macrophages", "Malignant.cells",        "Mast.cells",          "Myocytes",           "T.cells")
+colnames(norm_weights) <- c("B_Plasma.cells",   "Dendritic.cells", "Endothelial.cells",  "Epithelial.cells",       "Fibroblasts",       "Macrophages", "Malignant.cells",        "Mast.cells",          "Myocytes",           "T.cells")
+
+
+#plot_puck_continuous(myRCTD@spatialRNA, barcodes, norm_weights[,'Denate'], ylimit = c(0,0.5), title ='plot of Dentate weights')
+
+query <- AddMetaData(visium_data, norm_weights)
+pA <- lapply(colnames(norm_weights), function(i) {
+  data <- SpatialFeaturePlot(query, features = i)
+  maxval <- max(data$data[,i], na.rm = TRUE)
+  pA <- SpatialFeaturePlot(query, features = i, pt.size.factor = 1.8)
+  pA
+})
+
+binary_presence <- norm_weights
+binary_presence[binary_presence >= 0.1] <- 1
+binary_presence[binary_presence < 0.1] <- 0
+colnames(binary_presence) <- paste0(colnames(binary_presence), "_10pcbinary") %>% gsub("_wt", "", .)
+write.table(binary_presence, file = paste0(decon.outputdir, "presenceabsence_10pc.txt"), sep = "\t", quote = FALSE, col.names = NA)
+query <- AddMetaData(query, metadata = binary_presence)
+
+pB <- lapply(colnames(binary_presence), function(i) {
+  pA <- SpatialFeaturePlot(query, features = i, pt.size.factor = 1.8) + scale_fill_gradientn(limits = c(0, 1), colors = c("white", "lightseagreen"))
+  pA
+})
+
+
+RCTD_decon <- query[[c("T.cells",
+                         "Malignant.cells",
+                         "B_Plasma.cells",
+                         "Endothelial.cells",
+                         "Fibroblasts",
+                         "Macrophages",
+                         "Dendritic.cells",
+                         "Mast.cells",
+                         "Myocytes",
+                         "Epithelial.cells"
+                         )]]
+write.csv(RCTD_decon, file = "/Volumes/SPOPSCC-Q4358/Andrew_decon_folder/RCTD_results.csv")
+
+```
+
+
